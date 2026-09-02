@@ -17,7 +17,9 @@ concurrency:
 jobs:
   fetch-and-push:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # baostock 从 GitHub 海外 runner 访问国内服务器较慢，首次回填会触发大量网络重试，
+    # 90 分钟不够用。GitHub 托管 runner 单 job 上限 6 小时，这里放宽到上限。
+    timeout-minutes: 360
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -51,6 +53,10 @@ jobs:
           uv sync --frozen
 
       - name: 回填模式拉取数据（python main.py --backfill）
+        # 最多跑 350 分钟：到点由 GitHub 主动停止该步骤进程树，
+        # continue-on-error 让后续压缩/推送步骤照常执行（上传已有的、可能是部分的数据）
+        timeout-minutes: 350
+        continue-on-error: true
         env:
           # 备用占位，避免缺少 secret 时配置校验失败；如需飞书推送请在仓库 Secrets 配置 FEISHU_WEBHOOK_URL
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL || 'https://example.invalid/dummy' }}
