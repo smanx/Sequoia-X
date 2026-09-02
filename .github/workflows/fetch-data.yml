@@ -1,8 +1,10 @@
 name: Fetch Data & Push
 
-# 手动触发
+# 触发方式：手动触发 + 每天中国时间 16:00（= UTC 08:00）定时触发
 "on":
   workflow_dispatch:
+  schedule:
+    - cron: "0 8 * * *"
 
 # 需要向 data 分支推送代码，授予 contents 写权限
 permissions:

@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sequoia-X Web 控制台</title>
+<style>
+  :root{
+    --bg:#0d1117; --card:#161b22; --card2:#1c242e; --border:#2b3440;
+    --text:#e6edf3; --muted:#8b96a3; --accent:#3b82f6; --accent2:#60a5fa;
+    --good:#34d399; --bad:#f87171; --warn:#fbbf24;
+    --shadow:0 10px 30px rgba(0,0,0,.35);
+    --radius:14px;
+  }
+  *{box-sizing:border-box}
+  /* 主题化滚动条 */
+  ::-webkit-scrollbar{width:9px;height:9px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:#2f3a47;border-radius:999px;border:2px solid transparent;background-clip:padding-box}
+  ::-webkit-scrollbar-thumb:hover{background:#3b82f6;background-clip:padding-box;border:2px solid transparent}
+  ::-webkit-scrollbar-corner{background:transparent}
+  *{scrollbar-width:thin;scrollbar-color:#2f3a47 transparent}
+  *:hover{scrollbar-color:#3b82f6 transparent}
+  html,body{margin:0}
+  body{background:var(--bg);color:var(--text);
+    font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    background-image:radial-gradient(1200px 600px at 80% -10%,rgba(59,130,246,.12),transparent),
+                     radial-gradient(900px 500px at -10% 10%,rgba(52,211,153,.07),transparent);
+    background-attachment:fixed}
+  .wrap{max-width:1100px;margin:0 auto;padding:28px 18px 70px}
+  header{display:flex;align-items:baseline;gap:12px;margin-bottom:6px}
+  h1{font-size:24px;margin:0;letter-spacing:.5px}
+  .logo{color:var(--accent2)}
+  .sub{color:var(--muted);font-size:13px;margin:0 0 22px}
+
+  .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);
+    padding:18px 20px;margin-bottom:18px;box-shadow:var(--shadow)}
+  .card h2{font-size:14px;margin:0 0 14px;color:var(--accent2);
+    display:flex;align-items:center;gap:8px}
+  .card h2 .step{display:inline-flex;width:20px;height:20px;align-items:center;justify-content:center;
+    background:var(--accent);color:#fff;border-radius:6px;font-size:12px}
+
+  .stat{display:flex;gap:28px;flex-wrap:wrap;font-size:13px;color:var(--muted)}
+  .stat-item{display:flex;flex-direction:column}
+  .stat-item b{font-size:20px;color:var(--text)}
+  .stat-item small{color:var(--muted)}
+
+  .row{display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end}
+  .field{display:flex;flex-direction:column;gap:5px}
+  label{font-size:12px;color:var(--muted)}
+  input[type=date]{background:#0d141c;color:var(--text);border:1px solid var(--border);
+    border-radius:9px;padding:8px 10px;min-height:38px;outline:none}
+  input[type=date]:focus{border-color:var(--accent)}
+  button{border:none;border-radius:9px;padding:9px 20px;cursor:pointer;font-weight:600;
+    font-size:14px;transition:filter .15s,transform .05s}
+  button:active{transform:translateY(1px)}
+  .btn-primary{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff}
+  .btn-primary:disabled{opacity:.5;cursor:not-allowed}
+  .hint{color:var(--muted);font-size:12px;margin-top:8px;line-height:1.6}
+
+  .checks{display:flex;gap:8px;flex-wrap:wrap;margin:4px 0 12px}
+  .check{display:flex;align-items:center;gap:6px;background:var(--card2);border:1px solid var(--border);
+    border-radius:8px;padding:6px 11px;font-size:13px;cursor:pointer;transition:border-color .15s}
+  .check:hover{border-color:var(--accent)}
+  .check input{accent-color:var(--accent)}
+
+  #status{padding:6px 0;font-size:13px;min-height:20px}
+  .err{color:var(--bad)}
+  .ok{color:var(--good)}
+  .warn{color:var(--warn)}
+  .btn-danger{background:#dc2626;color:#fff;border:1px solid #b91c1c;border-radius:9px;
+    padding:8px 16px;font-size:13px;font-weight:600;cursor:pointer;transition:opacity .15s}
+  .btn-danger:hover{opacity:.88}
+  .spin{display:inline-block;width:12px;height:12px;border:2px solid var(--border);
+    border-top-color:var(--accent);border-radius:50%;animation:sp .7s linear infinite;vertical-align:-1px;margin-right:6px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+
+  /* ── Tabs ── */
+  .tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+  .tab{display:inline-flex;align-items:center;gap:8px;background:var(--card2);
+    border:1px solid var(--border);border-radius:10px;padding:8px 14px;cursor:pointer;
+    font-size:13px;color:var(--text);transition:background .15s,border-color .15s}
+  .tab:hover{border-color:var(--accent)}
+  .tab.active{background:var(--accent);border-color:var(--accent);color:#fff}
+  .tab .badge{background:rgba(255,255,255,.18);color:#fff;border-radius:999px;
+    padding:1px 8px;font-size:12px;font-weight:700}
+  .tab:not(.active) .badge{background:#2b3440;color:var(--accent2)}
+  .tab.shot .badge{background:#7c3aed;color:#fff} /* 命中时高亮 */
+
+  .panel{display:none;background:var(--card);border:1px solid var(--border);
+    border-radius:var(--radius);padding:18px 20px;box-shadow:var(--shadow)}
+  .panel.active{display:block;animation:fade .2s ease}
+  @keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+  .panel h3{margin:0 0 4px;font-size:15px}
+  .panel .desc{color:var(--muted);font-size:12px;margin-bottom:14px}
+
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{color:var(--muted);font-weight:500;font-size:12px;text-align:left;
+    padding:8px 10px;border-bottom:1px solid var(--border)}
+  td{padding:8px 10px;border-bottom:1px solid #20272f}
+  tr:hover td{background:rgba(59,130,246,.05)}
+  .code{font-family:ui-monospace,Consolas,monospace;font-weight:600;color:var(--accent2)}
+  .name{color:var(--text)}
+  .none{color:var(--muted);font-size:13px;padding:10px 0}
+  .overflow{font-size:12px;color:var(--muted);padding:8px 0}
+  .scroll{max-height:460px;overflow:auto;border:1px solid var(--border);border-radius:10px}
+
+  /* 统计块 */
+  .statbox{display:grid;grid-template-columns:repeat(3,minmax(120px,170px));gap:12px;
+    margin-bottom:16px;align-items:stretch}
+  .stat-cell{background:var(--card2);border:1px solid var(--border);border-radius:10px;
+    padding:12px 14px;display:flex;flex-direction:column}
+  .stat-cell b{font-size:22px;line-height:1;margin-bottom:4px}
+  .stat-cell small{color:var(--muted);font-size:12px}
+  .ok-cell b{color:var(--good)}
+  .bad-cell b{color:var(--bad)}
+  .stat-detail{grid-column:1 / -1;background:#0d141c;border:1px solid var(--border);
+    border-radius:10px;padding:12px 14px}
+  .reasons{display:flex;flex-direction:column;gap:10px}
+  .reason{display:flex;flex-direction:column;gap:4px}
+  .reason-row{display:flex;justify-content:space-between;align-items:center;font-size:13px}
+  .reason-name{color:var(--text)}
+  .reason-count{background:#7c3aed20;color:#c4b5fd;border-radius:999px;padding:1px 10px;font-weight:700}
+
+  /* 未来节点收益列 */
+  .future-scroll{overflow-x:auto;max-width:100%}
+  .future-scroll th{font-size:11px;white-space:nowrap;text-align:center}
+  .future-scroll td{text-align:center;white-space:nowrap;font-size:12px}
+  .future-scroll td.up{color:#f56565}     /* A股：涨红 */
+  .future-scroll td.down{color:#48bb78}   /* A股：跌绿 */
+  .future-scroll td .na{color:var(--muted);font-size:11px}
+  .future-scroll td .code,.future-scroll td .name{text-align:left}
+  .future-scroll .total-row td{border-top:2px solid var(--accent);background:var(--card2);
+    position:sticky;bottom:0;z-index:2}   /* 合计行悬浮固定在滚动区底部 */
+  .future-scroll .total-row td.total{font-weight:800}
+  .future-scroll .total-label{font-weight:700;color:var(--accent)}
+  .future-scroll .day-row td{background:var(--card2);color:var(--accent2);font-weight:700;
+    font-size:12px;text-align:left;letter-spacing:.3px}
+  .range-meta{font-size:12px;color:var(--muted);margin:0 0 10px}
+
+  /* 日期选择框 */
+  .dp{display:flex;align-items:center;justify-content:space-between;gap:8px;
+    background:#0d141c;color:var(--text);border:1px solid var(--border);
+    border-radius:9px;padding:8px 12px;min-height:38px;min-width:150px;cursor:pointer;
+    transition:border-color .15s;user-select:none}
+  .dp:hover,.dp.open{border-color:var(--accent)}
+  .dp .dp-text{font-size:13px}
+  .dp .dp-text.placeholder{color:var(--muted)}
+  .dp .dp-caret{color:var(--muted);font-size:11px}
+
+  /* 日历弹层 */
+  #calPop{position:fixed;z-index:100;width:300px;background:var(--card);
+    border:1px solid var(--border);border-radius:12px;box-shadow:0 16px 48px rgba(0,0,0,.5);
+    padding:10px;user-select:none}
+  .cal-head{display:flex;align-items:center;gap:4px;margin-bottom:8px}
+  .cal-title{flex:1;text-align:center;font-size:14px;font-weight:600}
+  .cal-nav,.cal-today{background:var(--card2);color:var(--text);border:1px solid var(--border);
+    border-radius:7px;padding:4px 9px;font-size:13px;cursor:pointer;line-height:1}
+  .cal-nav:hover,.cal-today:hover{border-color:var(--accent)}
+  .cal-week{display:grid;grid-template-columns:repeat(7,1fr);margin-bottom:4px}
+  .cal-week span{text-align:center;font-size:11px;color:var(--muted);padding:4px 0}
+  .cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:2px}
+  .cal-day{text-align:center;padding:6px 0;border-radius:7px;font-size:13px;cursor:pointer}
+  .cal-day:hover{background:var(--card2)}
+  .cal-day.today{outline:1px solid var(--accent);outline-offset:-1px}
+  .cal-day.sel{background:var(--accent);color:#fff;font-weight:700}
+  .cal-day.blank{cursor:default}
+  .cal-day.other{color:var(--muted)}
+  .cal-foot{margin-top:8px;text-align:center}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1><span class="logo">Sequoia-X</span> Web 控制台</h1>
+  </header>
+  <p class="sub">本地量化选股 · 数据区间更新 & 按任一交易日跑策略</p>
+
+  <!-- 数据库概况 -->
+  <div class="card">
+    <h2>📊 数据库概况</h2>
+    <div class="stat" id="dbinfo">
+      <div class="stat-item"><b>–</b><small>覆盖股票</small></div>
+      <div class="stat-item"><b>–</b><small>K线记录</small></div>
+      <div class="stat-item"><b>–</b><small>数据区间</small></div>
+    </div>
+  </div>
+
+  <!-- 数据更新 -->
+  <div class="card">
+    <h2><span class="step">1</span> 获取 / 更新区间数据</h2>
+    <div class="row">
+      <div class="field"><label>起始日期</label>
+        <div class="dp" data-for="rangeStart"><span class="dp-text">选择日期</span><span class="dp-caret">▾</span></div>
+        <input type="hidden" id="rangeStart"></div>
+      <div class="field"><label>结束日期</label>
+        <div class="dp" data-for="rangeEnd"><span class="dp-text">选择日期</span><span class="dp-caret">▾</span></div>
+        <input type="hidden" id="rangeEnd"></div>
+      <button class="btn-primary" id="btnUpdate">更新数据</button>
+    </div>
+    <div class="hint">从 baostock 拉取全市场 [起,止] 区间日K，覆盖式写入本地库（后复权）。
+      首次使用建议从较早日期（如 2024-01-01）回填，为均线类策略预留历史。</div>
+  </div>
+
+  <!-- 策略分析 -->
+  <div class="card">
+    <h2><span class="step">2</span> 选择日期，跑策略</h2>
+    <div class="row" style="margin-bottom:12px">
+      <div class="field"><label>分析日期（该交易日）</label>
+        <div class="dp" data-for="analyzeDate"><span class="dp-text">选择日期</span><span class="dp-caret">▾</span></div>
+        <input type="hidden" id="analyzeDate"></div>
+      <button class="btn-primary" id="btnAnalyze">开始分析</button>
+    </div>
+    <div class="row">
+      <div class="field"><label>范围起始</label>
+        <div class="dp" data-for="rangeAnaStart"><span class="dp-text">选择日期</span><span class="dp-caret">▾</span></div>
+        <input type="hidden" id="rangeAnaStart"></div>
+      <div class="field"><label>范围结束</label>
+        <div class="dp" data-for="rangeAnaEnd"><span class="dp-text">选择日期</span><span class="dp-caret">▾</span></div>
+        <input type="hidden" id="rangeAnaEnd"></div>
+      <button class="btn-primary" id="btnRange">运行范围分析</button>
+    </div>
+    <div class="checks" id="strategyChecks"></div>
+    <div class="hint">选择任意交易日，策略会在该日(含之前)的历史上判定"当天符合条件"的股票；或选择时间范围逐日运行（休市日自动跳过），结果列表带日期。每个策略对应一个标签页。</div>
+    <div id="status"></div>
+    <div id="stopWrap" style="display:none;margin-top:10px">
+      <button class="btn-danger" id="btnStop">■ 停止分析</button>
+    </div>
+  </div>
+
+  <!-- 结果区：Tabs -->
+  <div id="tabs"></div>
+  <div id="panels"></div>
+</div>
+
+<!-- 日期选择弹层 -->
+<div id="calPop" style="display:none">
+  <div class="cal-head">
+    <button class="cal-nav" data-act="py">«</button>
+    <button class="cal-nav" data-act="pm">‹</button>
+    <div class="cal-title">2026年1月</div>
+    <button class="cal-nav" data-act="nm">›</button>
+    <button class="cal-nav" data-act="ny">»</button>
+  </div>
+  <div class="cal-week">
+    <span>日</span><span>一</span><span>二</span><span>三</span>
+    <span>四</span><span>五</span><span>六</span>
+  </div>
+  <div class="cal-grid" id="calGrid"></div>
+  <div class="cal-foot"><button class="cal-today" data-act="today">回到今天</button></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const STRAT_FALLBACK = {
+  MaVolumeStrategy:{name:'MaVolume 均线放量'},
+  TurtleTradeStrategy:{name:'TurtleTrade 海龟突破'},
+  HighTightFlagStrategy:{name:'HighTightFlag 高窄旗形'},
+  LimitUpShakeoutStrategy:{name:'LimitUpShakeout 涨停洗盘'},
+  UptrendLimitDownStrategy:{name:'UptrendLimitDown 上升跌停'},
+  RpsBreakoutStrategy:{name:'RpsBreakout RPS突破'},
+};
+
+async function jget(url){ const r=await fetch(url); return r.json(); }
+async function jpost(url,data){
+  const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+  return r.json();
+}
+function setStatus(msg,cls){ $('status').innerHTML=msg; $('status').className=cls||''; }
+
+async function refreshInfo(){
+  try{
+    const info=await jget('/api/info');
+    $('dbinfo').innerHTML=
+      `<div class="stat-item"><b>${info.symbol_count}</b><small>覆盖股票</small></div>`+
+      `<div class="stat-item"><b>${info.row_count.toLocaleString()}</b><small>K线记录</small></div>`+
+      `<div class="stat-item"><b>${info.min_date} ~ ${info.max_date}</b><small>数据区间</small></div>`;
+    if(info.max_date){ setDate('rangeEnd',info.max_date); setDate('analyzeDate',info.max_date); setDate('rangeAnaEnd',info.max_date); }
+    if(info.min_date){ setDate('rangeStart',info.min_date); setDate('rangeAnaStart',info.min_date); }
+    // 范围分析默认取最近约 30 天，避免默认拉整个库区间
+    if(info.max_date){
+      const d=new Date(info.max_date); d.setDate(d.getDate()-30);
+      setDate('rangeAnaStart', `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`);
+    }
+  }catch(e){ $('dbinfo').innerHTML=`<span class="err">加载失败：${e.message}</span>`; }
+}
+
+async function renderChecks(){
+  try{
+    const meta=await jget('/api/strategies');
+    $('strategyChecks').innerHTML=meta.strategies.map(s=>{
+      const d=STRAT_FALLBACK[s.key]||{};
+      return `<label class="check"><input type="checkbox" data-key="${s.key}" checked>${d.name||s.key}</label>`;
+    }).join('');
+  }catch(e){
+    $('strategyChecks').innerHTML=Object.keys(STRAT_FALLBACK).map(k=>
+      `<label class="check"><input type="checkbox" data-key="${k}" checked>${STRAT_FALLBACK[k].name}</label>`).join('');
+  }
+}
+
+// ── Tabs 渲染 & 切换 ──
+let activeTab=null;
+function selectTab(key){
+  activeTab=key;
+  document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.key===key));
+  for(const p of $('panels').children) p.classList.toggle('active',p.id==='panel-'+key);
+}
+function renderTabs(keys,results,names,futures){
+  futures=futures||{};
+  $('tabs').innerHTML=keys.map(k=>{
+    const r=results[k]||{count:0};
+    const meta=STRAT_FALLBACK[k]||{name:k};
+    return `<div class="tab shot" data-key="${k}">${meta.name}<span class="badge">${r.count||0}</span></div>`;
+  }).join('');
+  $('panels').innerHTML='';
+  for(const k of keys){
+    const r=results[k]||{}; const meta=STRAT_FALLBACK[k]||{name:k};
+    const p=document.createElement('div'); p.className='panel'; p.id='panel-'+k;
+    let body;
+    if(r.error){ body=`<div class="none err">运行出错：${r.error}</div>`; }
+    else{
+      body = statsBlock(r.stats, names) + resultTable(r, names, futures);
+    }
+    p.innerHTML=`<h3>${meta.name} <span style="color:var(--muted);font-size:12px">(${r.count||0})</span></h3>`+
+      (r.desc?`<div class="desc">${r.desc}</div>`:'')+body;
+    $('panels').appendChild(p);
+  }
+  // 点击绑定
+  document.querySelectorAll('.tab').forEach(t=>{
+    t.onclick=()=>selectTab(t.dataset.key);
+  });
+  // 默认选中第一个
+  selectTab(keys[0]);
+}
+
+// 统计块：分析了多少 / 符合·不符合 / 不符原因分类
+function statsBlock(st,r){
+  const s=st||{};
+  const total=s.total||0, matched=s.matched||r.count||0, unmatched=Math.max(0,total-matched);
+  const reasons=s.reasons||{};
+  let reasonHtml;
+  if(!total){ reasonHtml=`<div class="none">当日无数据可分析</div>`; }
+  else if(!Object.keys(reasons).length){ reasonHtml=`<div class="none">无筛选原因：全部通过✅</div>`; }
+  else{
+    reasonHtml='<div class="reasons">'+Object.entries(reasons).map(([reason,count])=>{
+      const samples=(s.samples&&s.samples[reason]||[]).map(c=>`<span class="tag">${c}</span>`).join('')||'—';
+      return `<div class="reason"><div class="reason-row"><span class="reason-name">${reason}</span><span class="reason-count">${count}</span></div><div>${samples}</div></div>`;
+    }).join('')+'</div>';
+  }
+  return `<div class="statbox">
+      <div class="stat-cell"><b>${total||0}</b><small>分析条数</small></div>
+      <div class="stat-cell ok-cell"><b>${matched||0}</b><small>符合</small></div>
+      <div class="stat-cell bad-cell"><b>${unmatched}</b><small>不符合</small></div>
+      <div class="stat-detail">${reasonHtml}</div>
+    </div>`;
+}
+// 未来节点收益列定义
+const FUTURE_NODES=['T+1','T+3','T+5','1个月','3个月','半年','1年'];
+const UP_RGB='239,68,68', DOWN_RGB='72,187,120';   // 涨红 / 跌绿
+const CARD_RGB=[28,36,46];                          // --card2 底色，用于实心混合
+function cellStyle(v, solid){
+  if(v===null||v===undefined||isNaN(v)) return '';
+  const alpha=Math.min(1, Math.abs(v)/10);          // 幅度越大 → 背景越深（10% 封顶）
+  const rgb=v>=0?UP_RGB:DOWN_RGB;
+  const t=alpha*0.55;
+  if(solid){  // 实心不透明：与卡片底色按比例混合出 RGB，非 rgba
+    const c=rgb.split(',');
+    const R=Math.round(CARD_RGB[0]+(+c[0]-CARD_RGB[0])*t);
+    const G=Math.round(CARD_RGB[1]+(+c[1]-CARD_RGB[1])*t);
+    const B=Math.round(CARD_RGB[2]+(+c[2]-CARD_RGB[2])*t);
+    return `background:rgb(${R},${G},${B});border-radius:4px;font-weight:700;`;
+  }
+  return `background:rgba(${rgb},${t.toFixed(3)});border-radius:4px;font-weight:700;`;
+}
+function fmtPct(v, solid){
+  if(v===null||v===undefined||isNaN(v)) return '<span class="na">数据不足</span>';
+  const up=v>=0;
+  const txt=`${up?'+':''}${v.toFixed(2)}%`;
+  return solid
+    ? `<span style="color:#fff">${txt}</span>`          // 实心深背景上白字
+    : `<span class="${up?'up':'down'}">${txt}</span>`;
+}
+function resultTable(r,names,futures){
+  if(!r.symbols || !r.symbols.length){ return '<div class="none">（全部不符合，见上方原因分布）</div>'; }
+  const shown=r.symbols.slice(0,100);
+  // 叠加合计：对展示的每行，把同列涨跌代数求和（"数据不足"不参与）
+  const sum={}, hasSum={};
+  for(const s of shown){
+    const fut=futures&&futures[s]||{};
+    for(const node of FUTURE_NODES){
+      const v=fut[node];
+      if(v!==null&&v!==undefined&&!isNaN(v)){
+        sum[node]=(sum[node]||0)+v; hasSum[node]=true;
+      }
+    }
+  }
+  const anySum=FUTURE_NODES.some(n=>hasSum[n]);
+  const totalCells=FUTURE_NODES.map(node=>
+    hasSum[node]
+      ? `<td class="total" style="${cellStyle(sum[node], true)}">${fmtPct(sum[node], true)}</td>`
+      : `<td class="total"><span class="na">—</span></td>`).join('');
+  const totalRow=anySum?`<tr class="total-row"><td class="code total-label">合计</td><td class="name"></td>${totalCells}</tr>`:'';
+  const rows=shown.map(s=>{
+    const nm=names[s]||'';
+    const fut=futures&&futures[s]||{};
+    const cells=FUTURE_NODES.map(node=>`<td style="${cellStyle(fut[node])}">${fmtPct(fut[node])}</td>`).join('');
+    return `<tr><td class="code">${s}</td><td class="name">${nm||'—'}</td>${cells}</tr>`;
+  }).join('');
+  const heads=FUTURE_NODES.map(node=>`<th>${node}</th>`).join('');
+  return `<div class="scroll future-scroll"><table><thead><tr><th style="width:92px">代码</th><th>股票名称</th>${heads}</tr></thead><tbody>${rows}${totalRow}</tbody></table></div>`+
+    (r.symbols.length>100?`<div class="overflow">……共 ${r.symbols.length} 只，仅展示前 100 只</div>`:'');
+}
+
+// ── 范围分析：逐日综合结果，表格按交易日分组，行首显示日期，合计行置顶 ──
+function rangeTable(r,names,futures){
+  const days=r.days||[];
+  let sum={}, hasSum={};
+  for(const day of days){
+    for(const s of day.symbols){
+      const fut=(futures&&futures[s]&&futures[s][day.date])||{};
+      for(const node of FUTURE_NODES){
+        const v=fut[node];
+        if(v!==null&&v!==undefined&&!isNaN(v)){
+          sum[node]=(sum[node]||0)+v; hasSum[node]=true;
+        }
+      }
+    }
+  }
+  const totalCells=FUTURE_NODES.map(node=>
+    hasSum[node]
+      ? `<td class="total" style="${cellStyle(sum[node], true)}">${fmtPct(sum[node], true)}</td>`
+      : `<td class="total"><span class="na">—</span></td>`).join('');
+  // 合计行放在表格最底部，并用 sticky 固定在滚动区底部（滚动时始终可见）
+  const allRows=[];
+  for(const day of days){
+    const date=day.date;
+    // 交易日分组标题行
+    allRows.push(`<tr class="day-row"><td colspan="${FUTURE_NODES.length+2}">📅 ${date}　命中 ${day.count} 只</td></tr>`);
+    for(const s of day.symbols){
+      const nm=names[s]||'';
+      const fut=(futures&&futures[s]&&futures[s][date])||{};
+      const cells=FUTURE_NODES.map(node=>`<td style="${cellStyle(fut[node])}">${fmtPct(fut[node])}</td>`).join('');
+      allRows.push(`<tr><td class="code">${s}</td><td class="name">${nm||'—'}</td>${cells}</tr>`);
+    }
+  }
+  allRows.push(`<tr class="total-row"><td class="code total-label">合计</td><td class="name"></td>${totalCells}</tr>`);
+  const heads=FUTURE_NODES.map(node=>`<th>${node}</th>`).join('');
+  return `<div class="scroll future-scroll"><table><thead><tr><th style="width:92px">日期</th><th style="width:92px">代码</th><th>股票名称</th>${heads}</tr></thead><tbody>${allRows.join('')}</tbody></table></div>`;
+}
+function renderRangeTabs(keys,results,names,futures,tradeDays,start,end){
+  futures=futures||{};
+  $('tabs').innerHTML=keys.map(k=>{
+    const r=results[k]||{count:0};
+    const meta=STRAT_FALLBACK[k]||{name:k};
+    return `<div class="tab shot" data-key="${k}">${meta.name}<span class="badge">${r.count||0}</span></div>`;
+  }).join('');
+  $('panels').innerHTML='';
+  for(const k of keys){
+    const r=results[k]||{}; const meta=STRAT_FALLBACK[k]||{name:k};
+    const p=document.createElement('div'); p.className='panel'; p.id='panel-'+k;
+    let body;
+    if(r.error){ body=`<div class="none err">运行出错：${r.error}</div>`; }
+    else{
+      const nDays=(r.days||[]).length;
+      body=`<div class="range-meta">范围 ${start} ~ ${end}，共 ${tradeDays.length} 个交易日，本策略命中 ${r.count||0} 条</div>`+
+        (nDays?rangeTable(r,names,futures):'<div class="none">（范围内本策略无任何命中）</div>');
+    }
+    p.innerHTML=`<h3>${meta.name} <span style="color:var(--muted);font-size:12px">(${r.count||0} 条)</span></h3>`+
+      (r.desc?`<div class="desc">${r.desc}</div>`:'')+body;
+    $('panels').appendChild(p);
+  }
+  document.querySelectorAll('.tab').forEach(t=>{ t.onclick=()=>selectTab(t.dataset.key); });
+  selectTab(keys[0]);
+}
+
+// ── 日期弹框选择器（点击 .dp 弹出月历，快速选年月日）──
+let calFor=null, calY=0, calM=0;
+function pad(n){ return n<10?'0'+n:''+n; }
+function fmtCN(d){ if(!d) return ''; const [y,m,dd]=d.split('-'); return `${y}年${+m}月${+dd}日`; }
+function setDate(forId,val){
+  const inp=$(forId); inp.value=val||'';
+  const txt=document.querySelector(`.dp[data-for="${forId}"] .dp-text`);
+  if(!txt) return;
+  txt.textContent= val? fmtCN(val):'选择日期';
+  txt.classList.toggle('placeholder',!val);
+  if(calFor===forId) closeCal();
+}
+function closeCal(){ const p=$('calPop'); p.style.display='none'; calFor=null;
+  document.querySelectorAll('.dp').forEach(d=>d.classList.remove('open')); }
+function calInitial(forId){
+  const cur=$(forId).value;
+  if(cur){ const [y,m]=cur.split('-'); return {y:+y,m:+m-1}; }
+  if(calY) return {y:calY,m:calM};
+  const t=new Date(); return {y:t.getFullYear(),m:t.getMonth()};
+}
+function renderCal(){
+  const startDow=new Date(calY,calM,1).getDay();
+  const dim=new Date(calY,calM+1,0).getDate();
+  const t=new Date();
+  const tStr=`${t.getFullYear()}-${pad(t.getMonth()+1)}-${pad(t.getDate())}`;
+  const cur=calFor?$(calFor).value:'';
+  document.querySelector('.cal-title').textContent=`${calY}年${calM+1}月`;
+  let html='';
+  for(let i=0;i<startDow;i++) html+='<div class="cal-day blank"></div>';
+  for(let d=1;d<=dim;d++){
+    const ds=`${calY}-${pad(calM+1)}-${pad(d)}`;
+    const cls=['cal-day'];
+    if(ds===tStr) cls.push('today');
+    if(ds===cur) cls.push('sel');
+    html+=`<div class="${cls.join(' ')}" data-val="${ds}">${d}</div>`;
+  }
+  $('calGrid').innerHTML=html;
+}
+function openCal(forId,anchor){
+  closeCal(); calFor=forId;
+  const {y,m}=calInitial(forId); calY=y; calM=m;
+  renderCal();
+  const p=$('calPop');
+  const rect=anchor.getBoundingClientRect(), w=p.offsetWidth||300, h=p.offsetHeight||340;
+  let left=rect.left-w+rect.width;
+  left=Math.max(8,Math.min(left,window.innerWidth-w-8));
+  let top=rect.bottom+6;
+  if(top+h>window.innerHeight-8) top=Math.max(8,rect.top-h-6);
+  p.style.left=left+'px'; p.style.top=top+'px'; p.style.display='block';
+  anchor.classList.add('open');
+}
+$('calPop').addEventListener('click',(ev)=>{
+  const act=ev.target.closest('[data-act]');
+  if(act){
+    const a=act.dataset.act;
+    if(a==='py') calY--;
+    else if(a==='ny') calY++;
+    else if(a==='pm'){ calM--; if(calM<0){calM=11;calY--;} }
+    else if(a==='nm'){ calM++; if(calM>11){calM=0;calY++;} }
+    else if(a==='today'){ const t=new Date(); calY=t.getFullYear(); calM=t.getMonth(); }
+    renderCal(); return;
+  }
+  const day=ev.target.closest('.cal-day[data-val]');
+  if(day){ setDate(calFor, day.dataset.val); closeCal(); }
+});
+document.addEventListener('click',(ev)=>{
+  const dp=ev.target.closest('.dp');
+  if(dp){ ev.stopPropagation(); const fid=dp.dataset.for;
+    if(calFor===fid) closeCal(); else openCal(fid,dp); return; }
+  if(ev.target.closest('#calPop')) return;
+  closeCal();
+});
+
+$('btnUpdate').onclick=async ()=>{
+  const start=$('rangeStart').value,end=$('rangeEnd').value;
+  if(!start||!end){ setStatus('<span class="err">请先选择起止日期</span>'); return; }
+  $('btnUpdate').disabled=true;
+  setStatus('<span class="spin"></span>正在拉取全市场数据，可能需要几分钟，请稍候...');
+  try{
+    const r=await jpost('/api/data/update',{start,end});
+    if(r.ok){
+      setStatus(`<span class="ok">更新完成：写入 ${r.count} 行，交易日 ${r.min_date} ~ ${r.max_date}</span>`);
+      if(r.max_date) setDate('analyzeDate',r.max_date);
+      await refreshInfo();
+    }else setStatus(`<span class="err">更新失败：${r.error||'未知'}</span>`);
+  }catch(e){ setStatus(`<span class="err">请求失败：${e.message}</span>`); }
+  finally{ $('btnUpdate').disabled=false; }
+};
+
+$('btnAnalyze').onclick=async ()=>{
+  const d=$('analyzeDate').value;
+  if(!d){ setStatus('<span class="err">请先选择日期</span>'); return; }
+  const keys=[...document.querySelectorAll('#strategyChecks input:checked')].map(c=>c.dataset.key);
+  if(!keys.length){ setStatus('<span class="err">请至少勾选一个策略</span>'); return; }
+  $('btnAnalyze').disabled=true;
+  $('stopWrap').style.display='';
+  setStatus(`<span class="spin"></span>正在分析 ${d} ...`);
+  const t0=Date.now();
+  try{
+    const r=await jpost('/api/analyze',{date:d});
+    if(!r.ok){
+      setStatus(r.canceled?`<span class="warn">分析已取消</span>`:`<span class="err">分析失败：${r.error||'未知'}</span>`);
+      return;
+    }
+    const sec=((Date.now()-t0)/1000).toFixed(1);
+    setStatus(`<span class="ok">完成，用时 ${sec}s · ${d}</span>`);
+    renderTabs(keys, r.results, r.names||{}, r.futures||{});
+  }catch(e){ setStatus(`<span class="err">请求失败：${e.message}</span>`); }
+  finally{ $('btnAnalyze').disabled=false; $('stopWrap').style.display='none'; }  // 无论结果都恢复
+};
+
+$('btnRange').onclick=async ()=>{
+  const start=$('rangeAnaStart').value,end=$('rangeAnaEnd').value;
+  if(!start||!end){ setStatus('<span class="err">请先选择范围起止日期</span>'); return; }
+  const keys=[...document.querySelectorAll('#strategyChecks input:checked')].map(c=>c.dataset.key);
+  if(!keys.length){ setStatus('<span class="err">请至少勾选一个策略</span>'); return; }
+  $('btnRange').disabled=true;
+  $('stopWrap').style.display='';
+  setStatus(`<span class="spin"></span>正在逐日分析 ${start} ~ ${end}（休市日自动跳过），请稍候...`);
+  const t0=Date.now();
+  try{
+    const r=await jpost('/api/analyze_range',{start,end,strategies:keys});
+    if(!r.ok){
+      setStatus(r.canceled?`<span class="warn">范围分析已取消</span>`:`<span class="err">范围分析失败：${r.error||'未知'}</span>`);
+      return;
+    }
+    const sec=((Date.now()-t0)/1000).toFixed(1);
+    setStatus(`<span class="ok">完成，用时 ${sec}s · ${r.trade_days.length} 个交易日（${r.start} ~ ${r.end}）</span>`);
+    renderRangeTabs(keys, r.results, r.names||{}, r.futures||{}, r.trade_days||[], r.start, r.end);
+  }catch(e){ setStatus(`<span class="err">请求失败：${e.message}</span>`); }
+  finally{ $('btnRange').disabled=false; $('stopWrap').style.display='none'; }
+};
+
+$('btnStop').onclick=async ()=>{
+  setStatus('<span class="warn">正在请求停止，后台将在最近的检查点停下...</span>');
+  try{ await jpost('/api/cancel',{}); }catch(e){}
+};
+
+refreshInfo();
+renderChecks();
+</script>
+</body>
+</html>
