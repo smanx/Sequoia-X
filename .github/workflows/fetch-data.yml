@@ -1,0 +1,89 @@
+name: Fetch Data & Push
+
+# 手动触发
+"on":
+  workflow_dispatch:
+
+# 需要向 data 分支推送代码，授予 contents 写权限
+permissions:
+  contents: write
+
+concurrency:
+  group: fetch-data
+  cancel-in-progress: false
+
+jobs:
+  fetch-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 恢复 data 分支历史数据
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin data >/dev/null 2>&1; then
+            echo "发现 data 分支，尝试恢复历史数据..."
+            git fetch origin data --depth 1
+            if git cat-file -e "origin/data:data/sequoia_v2.tar.gz" 2>/dev/null; then
+              mkdir -p data
+              git show "origin/data:data/sequoia_v2.tar.gz" > data/sequoia_v2.tar.gz
+              tar -xzf data/sequoia_v2.tar.gz -C .
+              echo "已解压 data 分支历史数据到本地 data 目录"
+            else
+              echo "data 分支上不存在 data/sequoia_v2.tar.gz，跳过恢复"
+            fi
+          else
+            echo "data 分支不存在，跳过恢复"
+          fi
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装 uv 与依赖
+        run: |
+          pip install uv
+          uv sync --frozen
+
+      - name: 回填模式拉取数据（python main.py --backfill）
+        env:
+          # 备用占位，避免缺少 secret 时配置校验失败；如需飞书推送请在仓库 Secrets 配置 FEISHU_WEBHOOK_URL
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL || 'https://example.invalid/dummy' }}
+        run: uv run python main.py --backfill
+
+      - name: 校验数据文件并压缩 data 目录
+        run: |
+          test -f data/sequoia_v2.db || { echo "data/sequoia_v2.db 不存在，终止"; exit 1; }
+          tar -czf "$RUNNER_TEMP/sequoia_v2.tar.gz" -C . data
+
+      - name: 推送到 data 分支的 data 目录
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # data 分支存在则切换过去，否则创建空分支
+          if git ls-remote --exit-code --heads origin data >/dev/null 2>&1; then
+            git fetch origin data --depth 1
+            git checkout -B data origin/data
+          else
+            git checkout --orphan data
+          fi
+
+          # 清空工作区，只保留本次快照
+          git rm -rf . >/dev/null 2>&1 || true
+          mkdir -p data
+          cp "$RUNNER_TEMP/sequoia_v2.tar.gz" data/sequoia_v2.tar.gz
+
+          git add data/sequoia_v2.tar.gz
+          if git diff --cached --quiet; then
+            echo "数据无变化，跳过推送"
+          else
+            git commit -m "chore(data): update data snapshot"
+            git push origin data
+          fi
