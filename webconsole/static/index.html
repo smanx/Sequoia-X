@@ -57,6 +57,8 @@
   .btn-primary{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff}
   .btn-primary:disabled{opacity:.5;cursor:not-allowed}
   .hint{color:var(--muted);font-size:12px;margin-top:8px;line-height:1.6}
+  .sel{background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:8px;
+    padding:7px 10px;font-size:13px;cursor:pointer}
 
   .checks{display:flex;gap:8px;flex-wrap:wrap;margin:4px 0 12px}
   .check{display:flex;align-items:center;gap:6px;background:var(--card2);border:1px solid var(--border);
@@ -210,6 +212,13 @@
         <div class="dp" data-for="analyzeDate"><span class="dp-text">选择日期</span><span class="dp-caret">▾</span></div>
         <input type="hidden" id="analyzeDate"></div>
       <button class="btn-primary" id="btnAnalyze">开始分析</button>
+      <div class="field" style="margin-left:auto">
+        <label>线程模式</label>
+        <select id="modeSel" class="sel">
+          <option value="multi" selected>多线程（并行）</option>
+          <option value="single">单线程（串行）</option>
+        </select>
+      </div>
     </div>
     <div class="row">
       <div class="field"><label>范围起始</label>
@@ -572,7 +581,7 @@ $('btnAnalyze').onclick=async ()=>{
   setStatus(`<span class="spin"></span>正在分析 ${d} ...`);
   const t0=Date.now();
   try{
-    const r=await jpost('/api/analyze',{date:d});
+    const r=await jpost('/api/analyze',{date:d, mode:$('modeSel').value});
     if(!r.ok){
       setStatus(r.canceled?`<span class="warn">分析已取消</span>`:`<span class="err">分析失败：${r.error||'未知'}</span>`);
       return;
@@ -594,7 +603,7 @@ $('btnRange').onclick=async ()=>{
   setStatus(`<span class="spin"></span>正在逐日分析 ${start} ~ ${end}（休市日自动跳过），请稍候...`);
   const t0=Date.now();
   try{
-    const r=await jpost('/api/analyze_range',{start,end,strategies:keys});
+    const r=await jpost('/api/analyze_range',{start,end,strategies:keys, mode:$('modeSel').value});
     if(!r.ok){
       setStatus(r.canceled?`<span class="warn">范围分析已取消</span>`:`<span class="err">范围分析失败：${r.error||'未知'}</span>`);
       return;

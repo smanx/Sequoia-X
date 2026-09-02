@@ -41,6 +41,14 @@ _CREATE_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_symbol_date ON stock_daily (symbol, date);
 """
 
+# 股票名称表：名称映射本地持久化，分析时只读本地、不联网
+_CREATE_NAME_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS stock_names (
+    symbol TEXT PRIMARY KEY,
+    name   TEXT NOT NULL
+);
+"""
+
 
 def _default_db_path() -> str:
     override = os.environ.get("DB_PATH")
@@ -83,8 +91,14 @@ class DataEngine:
     def _init_db(self) -> None:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as conn:
+            # WAL 模式：多线程并发读不互相阻塞，显著提升并行分析性能（DB 级持久化）
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+            except sqlite3.Error:
+                pass
             conn.execute(_CREATE_TABLE_SQL)
             conn.execute(_CREATE_INDEX_SQL)
+            conn.execute(_CREATE_NAME_TABLE_SQL)
             conn.commit()
         print(f"数据库初始化完成：{self.db_path}")
 
@@ -244,11 +258,29 @@ class DataEngine:
 
     _NAME_CACHE: dict[str, str] = {}
 
-    def get_symbol_names(self, use_cache: bool = True) -> dict[str, str]:
-        """通过 baostock 获取全市场 code -> 股票名称 映射，进程内缓存。"""
-        if use_cache and self._NAME_CACHE:
+    def get_symbol_names(self, refresh: bool = False) -> dict[str, str]:
+        """返回全市场 code -> 股票名称 映射。
+
+        默认只读本地（内存缓存 -> SQLite stock_names 表），**不联网**；
+        仅当 refresh=True（数据更新时）或本地无任何名称时才访问 baostock 并持久化。
+        """
+        if not refresh and self._NAME_CACHE:
             return self._NAME_CACHE
 
+        if not refresh:
+            # 读本地表，避免分析时联网
+            with self._conn() as conn:
+                rows = conn.execute("SELECT symbol, name FROM stock_names").fetchall()
+            if rows:
+                names = dict(rows)
+                self._NAME_CACHE.clear()
+                self._NAME_CACHE.update(names)
+                return names
+
+        return self._refresh_names_remote()
+
+    def _refresh_names_remote(self) -> dict[str, str]:
+        """从 baostock 拉取全市场名称并持久化到本地表，更新进程内缓存。"""
         import baostock as bs
 
         lg = bs.login()
@@ -271,6 +303,13 @@ class DataEngine:
                 if name:
                     names[code] = name
             if names:
+                with self._conn() as conn:
+                    conn.execute("DELETE FROM stock_names")
+                    conn.executemany(
+                        "INSERT INTO stock_names(symbol, name) VALUES(?, ?)",
+                        list(names.items()),
+                    )
+                    conn.commit()
                 self._NAME_CACHE.clear()
                 self._NAME_CACHE.update(names)
             print(f"获取股票名称完成，共 {len(names)} 只")

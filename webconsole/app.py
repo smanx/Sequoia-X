@@ -14,9 +14,20 @@ import importlib
 import json
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
+
+# 分析中逐股票计算未来收益的并行线程数
+_FUT_WORKERS = 8
+
+# 线程模式：multi=多线程（按天并行），single=纯串行
+# 说明：策略评估已向量化（全表指标一次计算、按日毫秒级评估），耗时主体变为
+#       "预加载全表 + 指标一次计算"；按天并行受 Python GIL 限制收益甚微，
+#       保留下拉切换仅用于对比验证两模式结果一致。
+_THREAD_MODE = "multi"
+_DAY_WORKERS = 2        # 范围分析中并行处理的交易日数
 
 # 用「模块引用」方式导入（而非 from ... import 类），以支持热重载
 import engine as engine_mod
@@ -95,34 +106,41 @@ def get_engine():
 def get_strategies() -> dict:
     global _strategies
     if _strategies is None:
-        _strategies = strategies_mod.build_strategies(get_engine())
+        # 策略评估已向量化，只需元数据（key/name/desc）
+        _strategies = {m["key"]: m for m in strategies_mod.STRATEGY_META}
     return _strategies
 
 
-def run_analyze(as_of_date: str | None, keys: list[str] | None = None) -> dict:
-    """对指定日期运行全部（或 keys 指定的）策略，返回 (各策略选股, 代码->名称映射)。"""
-    results: dict = {}
-    name_engine = get_engine()
-    for key, strat in get_strategies().items():
-        if keys and key not in keys:
-            continue
-        check_cancel()  # 每个策略前检查取消
-        try:
-            selected = strat.run(as_of_date)
-            results[key] = {
-                "name": getattr(strat, "name", key),
-                "desc": getattr(strat, "desc", ""),
-                "count": len(selected),
-                "symbols": selected,
-                "stats": getattr(strat, "stats", None),
-            }
-        except Exception as exc:  # noqa: BLE001
-            logger(f"[{key}] 运行失败: {exc}")
-            results[key] = {"name": key, "desc": "", "count": 0, "symbols": [], "error": str(exc)}
-    # 汇总所有被选中的代码，一次性取名称，供前端展示
+def set_thread_mode(mode: str) -> str:
+    """设置分析线程模式（single/multi）。"""
+    global _THREAD_MODE
+    mode = mode if mode in ("single", "multi") else "multi"
+    _THREAD_MODE = mode
+    return _THREAD_MODE
+
+
+def analyze_day(as_of_date: str, keys: list[str] | None = None, ind_df=None) -> tuple[dict, set]:
+    """对指定日期运行全部（或 keys 指定的）策略。
+
+    ind_df 为 prepare() 后的全表（须覆盖 as_of 之前足够历史）；不传时按 as_of 现读。
+    Returns: (results, 命中代码集合)
+    """
+    if ind_df is None:
+        raw = get_engine().get_ohlcv_all(as_of_date)
+        ind_df = strategies_mod.prepare(raw)
+    results = strategies_mod.evaluate_day(ind_df, as_of_date, keys)
     all_codes = {s for r in results.values() for s in r.get("symbols", [])}
-    names = name_engine.get_symbol_names()
-    return results, {c: names.get(c, "") for c in all_codes}
+    return results, all_codes
+
+
+def _merge_day(results: dict, hit_days_by_code: dict, day: str, day_results: dict) -> None:
+    """把某一天的各策略结果并入综合结果容器。"""
+    for k, r in day_results.items():
+        bucket = results.setdefault(k, {"name": r["name"], "desc": r["desc"], "days": [], "count": 0})
+        bucket["days"].append({"date": day, "count": r["count"], "symbols": r.get("symbols", [])})
+        bucket["count"] += r["count"]
+        for s in r.get("symbols", []):
+            hit_days_by_code.setdefault(s, set()).add(day)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -169,7 +187,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(500, {"error": str(exc)})
         elif path == "/api/strategies":
             metas = [
-                {"key": k, "name": getattr(s, "name", k), "desc": getattr(s, "desc", "")}
+                {"key": k, "name": s["name"], "desc": s["desc"]}
                 for k, s in get_strategies().items()
             ]
             self._send(200, {"strategies": metas})
@@ -188,12 +206,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(400, {"error": "需要 start 和 end"})
                 return
             try:
-                result = get_engine().sync_range(start, end)
+                eng = get_engine()
+                result = eng.sync_range(start, end)
+                # 更新数据时顺带刷新名称映射并持久化本地，保证后续分析纯本地、不联网
+                eng.get_symbol_names(refresh=True)
                 self._send(200, {"ok": True, **result})
             except Exception as exc:  # noqa: BLE001
                 self._send(500, {"ok": False, "error": str(exc)})
 
         elif path == "/api/analyze":
+            set_thread_mode(data.get("mode"))  # 应用所选线程模式（single/multi）
             as_of = (data.get("date") or "").strip()
             if not as_of:
                 self._send(400, {"error": "需要 date"})
@@ -208,20 +230,35 @@ class Handler(BaseHTTPRequestHandler):
                         {"ok": False, "error": f"{as_of} 闭市或非交易日（库中无当日行情），本次不分析"},
                     )
                     return
-                results, names = run_analyze(as_of)
-                # 聚合所有命中股票的未来节点收益，供前端列表展示
-                all_codes = sorted({s for r in results.values() for s in r["symbols"]})
+                results, all_codes = analyze_day(as_of)
+                # 聚合所有命中股票的未来节点收益，供前端列表展示（多线程模式逐股票并行）
+                all_codes = sorted(all_codes)
                 futures: dict = {}
-                for code in all_codes:
-                    check_cancel()  # 每只股票计算前检查取消
-                    futures[code] = eng.future_returns(code, as_of)
-                self._send(200, {"ok": True, "date": as_of, "results": results, "names": names, "futures": futures})
+                if _THREAD_MODE == "multi":
+                    with ThreadPoolExecutor(max_workers=_FUT_WORKERS) as ex:
+                        for code, fut in zip(
+                            all_codes,
+                            ex.map(lambda c: eng.future_returns(c, as_of), all_codes),
+                        ):
+                            check_cancel()  # 每只股票计算前检查取消
+                            futures[code] = fut
+                else:
+                    for code in all_codes:
+                        check_cancel()
+                        futures[code] = eng.future_returns(code, as_of)
+                name_map = eng.get_symbol_names()
+                self._send(200, {
+                    "ok": True, "date": as_of, "results": results,
+                    "names": {c: name_map.get(c, "") for c in all_codes},
+                    "futures": futures,
+                })
             except AnalysisCanceled as exc:
                 self._send(200, {"ok": False, "canceled": True, "error": str(exc)})
             except Exception as exc:  # noqa: BLE001
                 self._send(500, {"ok": False, "error": str(exc)})
 
         elif path == "/api/analyze_range":
+            set_thread_mode(data.get("mode"))  # 应用所选线程模式（single/multi）
             start = (data.get("start") or "").strip()
             end = (data.get("end") or "").strip()
             if not start or not end:
@@ -239,25 +276,50 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(400, {"ok": False, "error": f"{start} ~ {end} 范围内无交易日（全部休市或无数据），本次不分析"})
                     return
 
-                # 逐日跑选中策略，综合收集
+                # 预加载全表一次并计算全部指标列，随后逐日评估（向量化，毫秒级/天）
+                full_df = eng.get_ohlcv_all()
+                ind_df = strategies_mod.prepare(full_df)
+
+                # 逐日跑选中策略，综合收集：
+                # 多线程模式按天并行（只读共享 ind_df，线程安全），单线程模式逐日串行
                 results: dict = {}
                 hit_days_by_code: dict[str, set] = {}
-                for day in trade_days:
-                    check_cancel()  # 每天开始前检查取消
-                    day_results, _ = run_analyze(day, keys)
-                    for k, r in day_results.items():
-                        bucket = results.setdefault(k, {"name": r["name"], "desc": r["desc"], "days": [], "count": 0})
-                        bucket["days"].append({"date": day, "count": r["count"], "symbols": r.get("symbols", [])})
-                        bucket["count"] += r["count"]
-                        for s in r.get("symbols", []):
-                            hit_days_by_code.setdefault(s, set()).add(day)
+
+                def _eval(day: str) -> dict:
+                    return strategies_mod.evaluate_day(ind_df, day, keys)
+
+                if _THREAD_MODE == "multi":
+                    with ThreadPoolExecutor(max_workers=_DAY_WORKERS) as ex:
+                        for day, day_results in zip(
+                            trade_days,
+                            ex.map(_eval, trade_days),
+                        ):
+                            check_cancel()  # 每天完成后检查取消
+                            _merge_day(results, hit_days_by_code, day, day_results)
+                else:
+                    for day in trade_days:
+                        check_cancel()  # 每天开始前检查取消
+                        day_results = strategies_mod.evaluate_day(ind_df, day, keys)
+                        _merge_day(results, hit_days_by_code, day, day_results)
 
                 # 未来节点收益：按股票一次性批量计算（每只股票覆盖其所有命中日）
                 all_codes = sorted(hit_days_by_code)
                 futures: dict = {}
-                for code in all_codes:
-                    check_cancel()  # 每只股票计算前检查取消
-                    futures[code] = eng.future_returns_for_dates(code, sorted(hit_days_by_code[code]))
+                if _THREAD_MODE == "multi":
+                    with ThreadPoolExecutor(max_workers=_FUT_WORKERS) as ex:
+                        for code, fut in zip(
+                            all_codes,
+                            ex.map(
+                                lambda c: eng.future_returns_for_dates(c, sorted(hit_days_by_code[c])),
+                                all_codes,
+                            ),
+                        ):
+                            check_cancel()  # 每只股票计算前检查取消
+                            futures[code] = fut
+                else:
+                    for code in all_codes:
+                        check_cancel()
+                        futures[code] = eng.future_returns_for_dates(code, sorted(hit_days_by_code[code]))
 
                 names = eng.get_symbol_names()
                 self._send(200, {
