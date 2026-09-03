@@ -656,6 +656,7 @@ function refreshReopen(){
 }
 function batchToText(){
   const codes=Object.keys(batchData); const out=[];
+  out.push(`查询日期：${lastAsOf?fmtCN(lastAsOf):'最新'}`);
   out.push(`共 ${codes.length} 只股票；数据项：${BATCH_KINDS.map(k=>k.title).join('、')}`);
   for(const code of codes){
     const nm=(lastNames&&lastNames[code])||'';

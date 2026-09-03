@@ -49,7 +49,7 @@ BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 
 # ── 数据源：默认本地，可切换为在线（下载 GitHub 打包的分卷数据库解压得到） ──
-ONLINE_ZIP_URL = "https://github.com/smanx/Sequoia-X/archive/refs/heads/master.zip"
+ONLINE_ZIP_URL = "https://github.com/smanx/Sequoia-X/archive/refs/heads/data.zip"
 # 在线数据源落盘路径：解压出的 db 单独存放，避免覆盖本地默认库
 ONLINE_DB_PATH = str((BASE_DIR.parent / "data" / "sequoia_online_v2.db").resolve())
 _DATASOURCE = {"source": "local"}
