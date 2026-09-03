@@ -66,7 +66,7 @@
   .check:hover{border-color:var(--accent)}
   .check input{accent-color:var(--accent)}
 
-  #status{padding:6px 0;font-size:13px;min-height:20px}
+  #status,#updateStatus{padding:6px 0;font-size:13px;min-height:20px}
   .err{color:var(--bad)}
   .ok{color:var(--good)}
   .warn{color:var(--warn)}
@@ -215,7 +215,9 @@
         <div class="dp" data-for="rangeEnd"><span class="dp-text">选择日期</span><span class="dp-caret">▾</span></div>
         <input type="hidden" id="rangeEnd"></div>
       <button class="btn-primary" id="btnUpdate">更新数据</button>
+      <button class="btn-danger" id="btnUpdateStop" style="display:none">■ 停止更新</button>
     </div>
+    <div id="updateStatus"></div>
     <div class="hint">从 baostock 拉取全市场 [起,止] 区间日K，覆盖式写入本地库（后复权）。
       首次使用建议从较早日期（如 2024-01-01）回填，为均线类策略预留历史。</div>
   </div>
@@ -292,6 +294,7 @@ async function jpost(url,data){
   return r.json();
 }
 function setStatus(msg,cls){ $('status').innerHTML=msg; $('status').className=cls||''; }
+function setUpdate(msg,cls){ $('updateStatus').innerHTML=msg; $('updateStatus').className=cls||''; }
 
 async function refreshInfo(){
   try{
@@ -573,18 +576,24 @@ document.addEventListener('click',(ev)=>{
 
 $('btnUpdate').onclick=async ()=>{
   const start=$('rangeStart').value,end=$('rangeEnd').value;
-  if(!start||!end){ setStatus('<span class="err">请先选择起止日期</span>'); return; }
-  $('btnUpdate').disabled=true;
-  setStatus('<span class="spin"></span>正在拉取全市场数据，可能需要几分钟，请稍候...');
+  if(!start||!end){ setUpdate('<span class="err">请先选择起止日期</span>'); return; }
+  $('btnUpdate').disabled=true; $('btnUpdateStop').style.display='';
+  setUpdate('<span class="spin"></span>正在拉取全市场数据，可能需要几分钟，请稍候...');
   try{
     const r=await jpost('/api/data/update',{start,end});
     if(r.ok){
-      setStatus(`<span class="ok">更新完成：写入 ${r.count} 行，交易日 ${r.min_date} ~ ${r.max_date}</span>`);
+      setUpdate(`<span class="ok">更新完成：写入 ${r.count} 行，交易日 ${r.min_date} ~ ${r.max_date}</span>`);
       if(r.max_date) setDate('analyzeDate',r.max_date);
       await refreshInfo();
-    }else setStatus(`<span class="err">更新失败：${r.error||'未知'}</span>`);
-  }catch(e){ setStatus(`<span class="err">请求失败：${e.message}</span>`); }
-  finally{ $('btnUpdate').disabled=false; }
+    }else setUpdate(r.canceled?`<span class="warn">更新已取消：${r.error||''}</span>`:`<span class="err">更新失败：${r.error||'未知'}</span>`);
+  }catch(e){ setUpdate(`<span class="err">请求失败：${e.message}</span>`); }
+  finally{ $('btnUpdate').disabled=false; $('btnUpdateStop').style.display='none'; }
+};
+$('btnUpdateStop').onclick=async ()=>{
+  $('btnUpdateStop').disabled=true;
+  setUpdate('<span class="warn">正在停止更新，后台将在最近的检查点终止并保留原区间数据...</span>');
+  try{ await jpost('/api/data/cancel',{}); }catch(e){}
+  $('btnUpdateStop').disabled=false;
 };
 
 $('btnAnalyze').onclick=async ()=>{
@@ -657,30 +666,25 @@ dsSel.onchange=async ()=>{
     if(r.ok){
       dsInfo=r;
       dsSel.value=r.source; syncDsBtn();
-      setStatus(`<span class="ok">已切换数据源：${r.source==='online'?'在线':'本地'}</span>`);
-      dsMsg(r.source==='online'
-        ? (r.online_ready?'当前：<b style="color:var(--accent2)">在线数据源</b>'
-          : '当前：<b style="color:var(--accent2)">在线数据源</b>（尚未获取，请点击「获取在线数据源」）')
-        : '当前：<b style="color:var(--accent2)">本地数据源</b>');
+      dsMsg(`已切换数据源：<b style="color:var(--accent2)">${r.source==='online'?'在线':'本地'}</b>`+
+        (r.source==='online' && !r.online_ready?'（尚未获取，请点击「获取在线数据源」）':''));
       await refreshInfo();
-    }else setStatus(`<span class="err">切换失败：${r.error||'未知'}</span>`);
-  }catch(e){ setStatus(`<span class="err">切换失败：${e.message}</span>`); }
+    }else dsMsg(`<span class="err">切换失败：${r.error||'未知'}</span>`);
+  }catch(e){ dsMsg(`<span class="err">切换失败：${e.message}</span>`); }
   finally{ dsSel.disabled=false; }
 };
 btnDsFetch.onclick=async ()=>{
   btnDsFetch.disabled=true;
-  setStatus('<span class="spin"></span>正在从 GitHub 下载并解压在线数据源（约上百 MB，请耐心等待）...');
-  dsMsg('下载/解压中，请勿关闭页面...');
+  dsMsg('<span class="spin"></span>正在从 GitHub 下载并解压在线数据源（约上百 MB，请耐心等待，请勿关闭页面）...');
   try{
     const r=await jpost('/api/online/fetch',{});
     if(r.ok){
       dsInfo=r;
       dsSel.value='online'; syncDsBtn();
-      setStatus(`<span class="ok">在线数据源获取完成：${(r.size/1048576).toFixed(1)}MB，用时 ${r.elapsed}s，已切换</span>`);
-      dsMsg('当前：<b style="color:var(--accent2)">在线数据源</b>');
+      dsMsg(`<span class="ok">获取完成：${(r.size/1048576).toFixed(1)}MB，用时 ${r.elapsed}s，当前为在线数据源</span>`);
       await refreshInfo();
-    }else setStatus(r.canceled?`<span class="warn">获取已取消</span>`:`<span class="err">获取失败：${r.error||'未知'}</span>`);
-  }catch(e){ setStatus(`<span class="err">获取失败：${e.message}</span>`); }
+    }else dsMsg(r.canceled?`<span class="warn">获取已取消</span>`:`<span class="err">获取失败：${r.error||'未知'}</span>`);
+  }catch(e){ dsMsg(`<span class="err">获取失败：${e.message}</span>`); }
   finally{ btnDsFetch.disabled=false; }
 };
 

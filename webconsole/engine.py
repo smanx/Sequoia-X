@@ -10,6 +10,7 @@
 import calendar
 import os
 import sqlite3
+import threading
 from datetime import date, timedelta  # noqa: F401  (timedelta 兼容原逻辑)
 from pathlib import Path
 
@@ -202,7 +203,7 @@ class DataEngine:
         finally:
             bs.logout()
 
-    def sync_range(self, start: str, end: str) -> dict:
+    def sync_range(self, start: str, end: str, cancel_event: threading.Event | None = None) -> dict:
         """多进程并行拉取全市场 [start, end] 区间日K（后复权），写入 SQLite。
 
         先删除该区间已有数据再写入，保证可重复执行、结果一致。
@@ -224,7 +225,21 @@ class DataEngine:
 
         print(f"拉取 {len(tasks)} 只股票 [{start} ~ {end}]，{n_workers} 进程并行...")
         with Pool(n_workers) as pool:
-            batch_results = pool.map(_bs_fetch_batch, chunks)
+            if cancel_event is None:
+                batch_results = pool.map(_bs_fetch_batch, chunks)
+            else:
+                # 支持取消：异步 map 并轮询取消标志，一旦取消立即 terminate 子进程；
+                # 取消发生在写库(DELETE)之前，原区间已有数据会被完整保留。
+                async_res = pool.map_async(_bs_fetch_batch, chunks)
+                while not async_res.ready():
+                    if cancel_event.is_set():
+                        pool.terminate()
+                        raise InterruptedError("更新已取消")
+                    async_res.wait(timeout=0.3)
+                if cancel_event.is_set():
+                    pool.terminate()
+                    raise InterruptedError("更新已取消")
+                batch_results = async_res.get()
 
         all_rows = []
         for batch in batch_results:

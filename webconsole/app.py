@@ -13,6 +13,8 @@
                              # 优先级：命令行参数 > SEQUOIA_PORT 环境变量 > 默认 8000
 """
 
+import base64
+import hmac
 import importlib
 import json
 import os
@@ -49,6 +51,17 @@ ONLINE_ZIP_URL = "https://github.com/smanx/Sequoia-X/archive/refs/heads/master.z
 ONLINE_DB_PATH = str((BASE_DIR.parent / "data" / "sequoia_online_v2.db").resolve())
 _DATASOURCE = {"source": "local"}
 
+# ── Web Basic 认证：默认 admin/admin，可用环境变量 SEQUOIA_USER / SEQUOIA_PASS 修改 ──
+AUTH_USER = os.environ.get("SEQUOIA_USER", "admin")
+AUTH_PASS = os.environ.get("SEQUOIA_PASS", "admin")
+# 认证失败时浏览器弹出的提示标题
+AUTH_REALM = "Sequoia-X"
+
+
+def _auth_creds():
+    """返回当前生效的 Web 认证账号密码（环境变量在启动时已读入）。"""
+    return AUTH_USER, AUTH_PASS
+
 # 惰性初始化，避免 Windows 下 multiprocessing 重导入主模块时重复建连
 _engine = None
 _strategies: dict | None = None
@@ -65,6 +78,10 @@ def check_cancel() -> None:
     """在分析循环的检查点调用；已取消则抛出，让后台真正停止后续分析。"""
     if _CANCEL.is_set():
         raise AnalysisCanceled("分析已取消")
+
+
+# 数据更新取消：与 _CANCEL(分析) 相互独立，运行数据更新请求时传入 sync_range
+_UPDATE_CANCEL = threading.Event()
 
 # ── 自动热重载：检测业务模块文件变化，改动后下一次请求自动用新代码 ──
 _RELOAD_MODULES: dict[str, object] = {"engine": engine_mod, "strategies": strategies_mod}
@@ -288,6 +305,28 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return {}
 
+    # ── Web Basic 认证：校验 Authorization 头，失败返回 401 ──
+    def _check_auth(self) -> bool:
+        user, pwd = _auth_creds()
+        header = self.headers.get("Authorization", "")
+        if not header.startswith("Basic "):
+            return False
+        try:
+            decoded = base64.b64decode(header[6:].strip()).decode("utf-8")
+        except Exception:  # noqa: BLE001
+            return False
+        given_user, _, given_pwd = decoded.partition(":")
+        return hmac.compare_digest(given_user, user) and hmac.compare_digest(given_pwd, pwd)
+
+    def _require_auth(self) -> bool:
+        if self._check_auth():
+            return True
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", f'Basic realm="{AUTH_REALM}"')
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+        return False
+
     def _serve_static(self, name: str, ctype: str) -> None:
         path = STATIC_DIR / name
         if not path.is_file():
@@ -297,6 +336,8 @@ class Handler(BaseHTTPRequestHandler):
 
     # ── 路由 ──
     def do_GET(self) -> None:
+        if not self._require_auth():
+            return
         _maybe_reload()
         path = urlparse(self.path).path
         if path in ("/", "/index.html"):
@@ -325,6 +366,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": f"unknown path {path}"}, "text/plain")
 
     def do_POST(self) -> None:
+        if not self._require_auth():
+            return
         _maybe_reload()
         path = urlparse(self.path).path
         data = self._read_json()
@@ -335,14 +378,21 @@ class Handler(BaseHTTPRequestHandler):
             if not start or not end:
                 self._send(400, {"error": "需要 start 和 end"})
                 return
+            _UPDATE_CANCEL.clear()  # 新一次更新复位取消标志
             try:
                 eng = get_engine()
-                result = eng.sync_range(start, end)
+                result = eng.sync_range(start, end, cancel_event=_UPDATE_CANCEL)
                 # 更新数据时顺带刷新名称映射并持久化本地，保证后续分析纯本地、不联网
                 eng.get_symbol_names(refresh=True)
                 self._send(200, {"ok": True, **result})
+            except InterruptedError:
+                self._send(200, {"ok": False, "canceled": True, "error": "更新已取消（原区间数据已保留）"})
             except Exception as exc:  # noqa: BLE001
                 self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/data/cancel":
+            _UPDATE_CANCEL.set()  # 通知正在运行的数据更新在下一个检查点终止
+            self._send(200, {"ok": True, "canceled": True})
 
         elif path == "/api/datasource":
             # 切换数据源：local=本地默认库，online=在线下载库（允许切到在线，即使未获取
