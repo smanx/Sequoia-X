@@ -8,12 +8,17 @@
 
 启动：
   python app.py [port]      # 默认 8000，浏览器访问 http://127.0.0.1:8000
+                             # 端口也可用环境变量 SEQUOIA_PORT 指定
+                             # 优先级：命令行参数 > SEQUOIA_PORT 环境变量 > 默认 8000
 """
 
 import importlib
 import json
+import os
+import sqlite3
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -36,6 +41,12 @@ import strategies as strategies_mod
 logger = engine_mod.get_logger(__name__)
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
+
+# ── 数据源：默认本地，可切换为在线（下载 GitHub 打包的分卷数据库解压得到） ──
+ONLINE_ZIP_URL = "https://github.com/smanx/Sequoia-X/archive/refs/heads/master.zip"
+# 在线数据源落盘路径：解压出的 db 单独存放，避免覆盖本地默认库
+ONLINE_DB_PATH = str((BASE_DIR.parent / "data" / "sequoia_online_v2.db").resolve())
+_DATASOURCE = {"source": "local"}
 
 # 惰性初始化，避免 Windows 下 multiprocessing 重导入主模块时重复建连
 _engine = None
@@ -99,8 +110,117 @@ def _maybe_reload() -> None:
 def get_engine():
     global _engine
     if _engine is None:
-        _engine = engine_mod.DataEngine()
+        db_path = ONLINE_DB_PATH if _DATASOURCE["source"] == "online" else engine_mod._default_db_path()
+        _engine = engine_mod.DataEngine(db_path)
     return _engine
+
+
+def set_datasource(source: str | None) -> str:
+    """切换数据源：local=本地默认库，online=在线下载库。变化时重建引擎连接。"""
+    global _engine
+    source = source if source in ("local", "online") else "local"
+    if source != _DATASOURCE["source"]:
+        _DATASOURCE["source"] = source
+        _engine = None  # 下次 get_engine 用新库重建连接
+    return source
+
+
+def online_ready() -> bool:
+    """在线数据源是否已获取：在线库文件存在且 stock_daily 表有数据。
+
+    注意：切到在线源但未获取时，get_engine 会按路径创建一个空库文件（建表），
+    因此不能仅凭文件存在判断，必须以"是否有实际行情数据"为准。
+    """
+    if not os.path.exists(ONLINE_DB_PATH):
+        return False
+    try:
+        conn = sqlite3.connect(ONLINE_DB_PATH)
+        n = conn.execute("SELECT COUNT(*) FROM stock_daily").fetchone()[0]
+        conn.close()
+        return n > 0
+    except Exception:  # noqa: BLE001  (表不存在/损坏等一律视为未获取)
+        return False
+
+
+def get_engine():
+    global _engine
+    if _engine is None:
+        db_path = ONLINE_DB_PATH if _DATASOURCE["source"] == "online" else engine_mod._default_db_path()
+        _engine = engine_mod.DataEngine(db_path)
+    return _engine
+
+
+def _download_stream(url: str, dest: str, chunk: int = 1024 * 256) -> None:
+    """流式下载大文件到本地路径，避免一次性载入内存。"""
+    import urllib.request
+
+    with urllib.request.urlopen(url, timeout=60) as resp, open(dest, "wb") as f:
+        while True:
+            buf = resp.read(chunk)
+            if not buf:
+                break
+            f.write(buf)
+
+
+def fetch_online_source() -> str:
+    """获取在线数据源：下载 master.zip -> 解压 -> 拼接分卷 -> 解 tar.gz -> 取得 db。
+
+    分卷命名参考 .github/workflows/fetch-data.yml：
+      打包: tar -czf - -C . data | split -b 90m - sequoia_v2.tar.gz.
+      解包: 拼接所有 data/sequoia_v2.tar.gz.* 分卷 → tar.gz → 解出 data/sequoia_v2.db
+    Returns: 在线数据源 db 的落盘路径。
+    """
+    import glob
+    import shutil
+    import tarfile
+    import tempfile
+    import zipfile
+
+    tmp = tempfile.mkdtemp(prefix="seq_online_")
+    try:
+        zip_path = os.path.join(tmp, "master.zip")
+        _download_stream(ONLINE_ZIP_URL, zip_path)
+
+        with zipfile.ZipFile(zip_path) as z:
+            top = z.namelist()[0].split("/")[0] if z.namelist() else ""
+            z.extractall(tmp)
+
+        src_data = os.path.join(tmp, top, "data")
+        parts = sorted(glob.glob(os.path.join(src_data, "sequoia_v2.tar.gz.*")))
+        if not parts:
+            # 兼容无分卷的情况：单文件 tar.gz 或直接裸 db
+            single = os.path.join(src_data, "sequoia_v2.tar.gz")
+            direct_db = os.path.join(src_data, "sequoia_v2.db")
+            if os.path.isfile(single):
+                parts = [single]
+            elif os.path.isfile(direct_db):
+                os.makedirs(os.path.dirname(ONLINE_DB_PATH), exist_ok=True)
+                shutil.copy(direct_db, ONLINE_DB_PATH)
+                return ONLINE_DB_PATH
+            else:
+                raise FileNotFoundError("在线源码包 data 目录未找到数据库分卷(sequoia_v2.tar.gz.*)")
+
+        # 拼接分卷成完整 tar.gz
+        tar_path = os.path.join(tmp, "sequoia_v2.tar.gz")
+        with open(tar_path, "wb") as out:
+            for p in parts:
+                with open(p, "rb") as f:
+                    shutil.copyfileobj(f, out)
+
+        # 解 tar.gz（内部是相对 . 的 data/ 目录）
+        with tarfile.open(tar_path, "r:gz") as t:
+            t.extractall(tmp)
+        db = os.path.join(tmp, "data", "sequoia_v2.db")
+        if not os.path.isfile(db):
+            db = os.path.join(src_data, "sequoia_v2.db")
+        if not os.path.isfile(db):
+            raise FileNotFoundError("解压后未找到 sequoia_v2.db")
+
+        os.makedirs(os.path.dirname(ONLINE_DB_PATH), exist_ok=True)
+        shutil.copy(db, ONLINE_DB_PATH)
+        return ONLINE_DB_PATH
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def get_strategies() -> dict:
@@ -191,6 +311,15 @@ class Handler(BaseHTTPRequestHandler):
                 for k, s in get_strategies().items()
             ]
             self._send(200, {"strategies": metas})
+        elif path == "/api/datasource":
+            try:
+                self._send(200, {
+                    "source": _DATASOURCE["source"],
+                    "online_ready": online_ready(),
+                    "info": get_engine().get_db_info(),
+                })
+            except Exception as exc:  # noqa: BLE001
+                self._send(500, {"error": str(exc)})
         else:
             self._send(404, {"error": f"unknown path {path}"}, "text/plain")
 
@@ -211,6 +340,38 @@ class Handler(BaseHTTPRequestHandler):
                 # 更新数据时顺带刷新名称映射并持久化本地，保证后续分析纯本地、不联网
                 eng.get_symbol_names(refresh=True)
                 self._send(200, {"ok": True, **result})
+            except Exception as exc:  # noqa: BLE001
+                self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/datasource":
+            # 切换数据源：local=本地默认库，online=在线下载库（允许切到在线，即使未获取
+            # 以便展示「获取在线数据源」按钮；online_ready 反映是否有实际数据）
+            source = set_datasource(data.get("source"))
+            try:
+                info = get_engine().get_db_info()
+                self._send(200, {
+                    "ok": True, "source": source, "online_ready": online_ready(),
+                    "info": info,
+                })
+            except Exception as exc:  # noqa: BLE001
+                self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/online/fetch":
+            # 获取在线数据源：下载 master.zip 解压 → 拼分卷 → 解 tar.gz → 得到 db
+            try:
+                t0 = time.time()
+                db = fetch_online_source()
+                set_datasource("online")  # 获取成功后自动切到在线数据源
+                info = get_engine().get_db_info()
+                from pathlib import Path as _P
+                self._send(200, {
+                    "ok": True, "source": "online", "db": db,
+                    "size": _P(db).stat().st_size,
+                    "elapsed": round(time.time() - t0, 1),
+                    "info": info,
+                })
+            except AnalysisCanceled as exc:
+                self._send(200, {"ok": False, "canceled": True, "error": str(exc)})
             except Exception as exc:  # noqa: BLE001
                 self._send(500, {"ok": False, "error": str(exc)})
 
@@ -376,5 +537,9 @@ def main(port: int = 8000) -> None:
 
 
 if __name__ == "__main__":
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
+    # 端口优先级：命令行参数 > 环境变量 SEQUOIA_PORT > 默认 8000
+    if len(sys.argv) > 1:
+        port = int(sys.argv[1])
+    else:
+        port = int(os.environ.get("SEQUOIA_PORT", 8000))
     main(port)

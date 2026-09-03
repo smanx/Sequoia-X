@@ -188,6 +188,22 @@
     </div>
   </div>
 
+  <!-- 数据源切换 -->
+  <div class="card">
+    <h2><span class="step">↻</span> 数据源</h2>
+    <div class="row">
+      <div class="field"><label>数据源</label>
+        <select id="dsSel" class="sel">
+          <option value="local" selected>本地数据源</option>
+          <option value="online">在线数据源</option>
+        </select>
+      </div>
+      <button class="btn-primary" id="btnDsFetch" style="display:none">获取在线数据源</button>
+      <div id="dsStatus" class="hint" style="margin-top:6px;flex-basis:100%"></div>
+    </div>
+    <div class="hint">本地数据源为当前 `data/sequoia_v2.db`；切换到在线数据源后，点"获取在线数据源"从 GitHub 下载打包的分卷数据库（`sequoia_v2.tar.gz.aa/.ab/...`）并解压到本地单独存放，不影响本地默认库。</div>
+  </div>
+
   <!-- 数据更新 -->
   <div class="card">
     <h2><span class="step">1</span> 获取 / 更新区间数据</h2>
@@ -620,8 +636,57 @@ $('btnStop').onclick=async ()=>{
   try{ await jpost('/api/cancel',{}); }catch(e){}
 };
 
+// ── 数据源切换 ──
+const dsSel=$('dsSel'), btnDsFetch=$('btnDsFetch'), dsStatus=$('dsStatus');
+function syncDsBtn(){ btnDsFetch.style.display=dsSel.value==='online'?'':'none'; }
+function dsMsg(html){ dsStatus.innerHTML=html; }
+let dsInfo=null;
+async function loadDs(){
+  try{
+    dsInfo=await jget('/api/datasource');
+    const now=dsInfo&&dsInfo.source||'local';
+    dsSel.value=now; syncDsBtn();
+    dsMsg(`当前：<b style="color:var(--accent2)">${now==='online'?'在线数据源':'本地数据源'}</b>`);
+  }catch(e){ dsMsg(`<span class="err">读取数据源失败：${e.message}</span>`); }
+}
+dsSel.onchange=async ()=>{
+  const selVal=dsSel.value;
+  dsSel.disabled=true;
+  try{
+    const r=await jpost('/api/datasource',{source:selVal});
+    if(r.ok){
+      dsInfo=r;
+      dsSel.value=r.source; syncDsBtn();
+      setStatus(`<span class="ok">已切换数据源：${r.source==='online'?'在线':'本地'}</span>`);
+      dsMsg(r.source==='online'
+        ? (r.online_ready?'当前：<b style="color:var(--accent2)">在线数据源</b>'
+          : '当前：<b style="color:var(--accent2)">在线数据源</b>（尚未获取，请点击「获取在线数据源」）')
+        : '当前：<b style="color:var(--accent2)">本地数据源</b>');
+      await refreshInfo();
+    }else setStatus(`<span class="err">切换失败：${r.error||'未知'}</span>`);
+  }catch(e){ setStatus(`<span class="err">切换失败：${e.message}</span>`); }
+  finally{ dsSel.disabled=false; }
+};
+btnDsFetch.onclick=async ()=>{
+  btnDsFetch.disabled=true;
+  setStatus('<span class="spin"></span>正在从 GitHub 下载并解压在线数据源（约上百 MB，请耐心等待）...');
+  dsMsg('下载/解压中，请勿关闭页面...');
+  try{
+    const r=await jpost('/api/online/fetch',{});
+    if(r.ok){
+      dsInfo=r;
+      dsSel.value='online'; syncDsBtn();
+      setStatus(`<span class="ok">在线数据源获取完成：${(r.size/1048576).toFixed(1)}MB，用时 ${r.elapsed}s，已切换</span>`);
+      dsMsg('当前：<b style="color:var(--accent2)">在线数据源</b>');
+      await refreshInfo();
+    }else setStatus(r.canceled?`<span class="warn">获取已取消</span>`:`<span class="err">获取失败：${r.error||'未知'}</span>`);
+  }catch(e){ setStatus(`<span class="err">获取失败：${e.message}</span>`); }
+  finally{ btnDsFetch.disabled=false; }
+};
+
 refreshInfo();
 renderChecks();
+loadDs();
 </script>
 </body>
 </html>
