@@ -527,15 +527,15 @@ function rangeTable(r,names,futures){
   for(const day of days){
     const date=day.date;
     // 交易日分组标题行
-    allRows.push(`<tr class="day-row"><td colspan="${FUTURE_NODES.length+2}">📅 ${date}　命中 ${day.count} 只</td></tr>`);
+    allRows.push(`<tr class="day-row"><td colspan="${FUTURE_NODES.length+3}">📅 ${date}　命中 ${day.count} 只</td></tr>`);
     for(const s of day.symbols){
       const nm=names[s]||'';
       const fut=(futures&&futures[s]&&futures[s][date])||{};
       const cells=FUTURE_NODES.map(node=>`<td style="${cellStyle(fut[node])}">${fmtPct(fut[node])}</td>`).join('');
-      allRows.push(`<tr><td class="code"><a target="_blank" href="/stock.html?code=${s}&name=${encodeURIComponent(nm)}&as_of=${encodeURIComponent(date)}" class="stock-link">${s}</a></td><td class="name">${nm||'—'}</td>${cells}</tr>`);
+      allRows.push(`<tr><td class="date">${date}</td><td class="code"><a target="_blank" href="/stock.html?code=${s}&name=${encodeURIComponent(nm)}&as_of=${encodeURIComponent(date)}" class="stock-link">${s}</a></td><td class="name">${nm||'—'}</td>${cells}</tr>`);
     }
   }
-  allRows.push(`<tr class="total-row"><td class="code total-label">合计</td><td class="name"></td>${totalCells}</tr>`);
+  allRows.push(`<tr class="total-row"><td class="date"></td><td class="code total-label">合计</td><td class="name"></td>${totalCells}</tr>`);
   const heads=FUTURE_NODES.map(node=>`<th>${node}</th>`).join('');
   return `<div class="scroll future-scroll"><table><thead><tr><th style="width:92px">日期</th><th style="width:92px">代码</th><th>股票名称</th>${heads}</tr></thead><tbody>${allRows.join('')}</tbody></table></div>`;
 }
