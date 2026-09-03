@@ -371,8 +371,7 @@ function statsBlock(st,r){
   else if(!Object.keys(reasons).length){ reasonHtml=`<div class="none">无筛选原因：全部通过✅</div>`; }
   else{
     reasonHtml='<div class="reasons">'+Object.entries(reasons).map(([reason,count])=>{
-      const samples=(s.samples&&s.samples[reason]||[]).map(c=>`<span class="tag">${c}</span>`).join('')||'—';
-      return `<div class="reason"><div class="reason-row"><span class="reason-name">${reason}</span><span class="reason-count">${count}</span></div><div>${samples}</div></div>`;
+      return `<div class="reason"><div class="reason-row"><span class="reason-name">${reason}</span><span class="reason-count">${count}</span></div></div>`;
     }).join('')+'</div>';
   }
   return `<div class="statbox">
@@ -490,7 +489,8 @@ function renderRangeTabs(keys,results,names,futures,tradeDays,start,end){
     if(r.error){ body=`<div class="none err">运行出错：${r.error}</div>`; }
     else{
       const nDays=(r.days||[]).length;
-      body=`<div class="range-meta">范围 ${start} ~ ${end}，共 ${tradeDays.length} 个交易日，本策略命中 ${r.count||0} 条</div>`+
+      body=`<div class="range-meta">范围 ${start} ~ ${end}，共 ${tradeDays.length} 个交易日，本策略范围内命中 ${r.count||0} 条</div>`+
+        (r.stats?statsBlock(r.stats,r):'')+
         (nDays?rangeTable(r,names,futures):'<div class="none">（范围内本策略无任何命中）</div>');
     }
     p.innerHTML=`<h3>${meta.name} <span style="color:var(--muted);font-size:12px">(${r.count||0} 条)</span></h3>`+

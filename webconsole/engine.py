@@ -182,11 +182,12 @@ class DataEngine:
 
         lg = bs.login()
         if lg.error_code != "0":
-            print(f"baostock 登录失败: {lg.error_msg}")
-            return []
+            raise ConnectionError(f"baostock 登录失败: {lg.error_msg}")
 
         try:
             rs = bs.query_stock_basic(code_name="", code="")
+            if rs.error_code != "0":
+                raise RuntimeError(f"baostock 获取股票列表失败: {rs.error_msg}")
             symbols = []
             while rs.next():
                 row = rs.get_row_data()
@@ -197,9 +198,6 @@ class DataEngine:
                     symbols.append(code.split(".")[1])
             print(f"获取股票列表完成，共 {len(symbols)} 只")
             return symbols
-        except Exception as exc:
-            print(f"获取股票列表失败: {exc}")
-            return []
         finally:
             bs.logout()
 

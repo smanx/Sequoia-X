@@ -272,11 +272,23 @@ def analyze_day(as_of_date: str, keys: list[str] | None = None, ind_df=None) -> 
 
 
 def _merge_day(results: dict, hit_days_by_code: dict, day: str, day_results: dict) -> None:
-    """把某一天的各策略结果并入综合结果容器。"""
+    """把某一天的各策略结果并入综合结果容器，并累加该日统计（分析条数/不符原因）。
+
+    bucket["stats"] 跨天累加 total / matched / reasons，供范围分析显示"分析多少条、不符原因分布"。
+    """
     for k, r in day_results.items():
-        bucket = results.setdefault(k, {"name": r["name"], "desc": r["desc"], "days": [], "count": 0})
+        bucket = results.setdefault(k, {
+            "name": r["name"], "desc": r["desc"], "days": [], "count": 0,
+            "stats": {"total": 0, "matched": 0, "reasons": {}},
+        })
         bucket["days"].append({"date": day, "count": r["count"], "symbols": r.get("symbols", [])})
         bucket["count"] += r["count"]
+        dp = r.get("stats") or {}
+        st = bucket["stats"]
+        st["total"] += dp.get("total", 0)
+        st["matched"] += dp.get("matched", len(r.get("symbols", [])))
+        for reason, cnt in (dp.get("reasons") or {}).items():
+            st["reasons"][reason] = st["reasons"].get(reason, 0) + int(cnt)
         for s in r.get("symbols", []):
             hit_days_by_code.setdefault(s, set()).add(day)
 
