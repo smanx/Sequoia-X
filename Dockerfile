@@ -33,8 +33,8 @@ VOLUME ["/app/data"]
 
 # 容器内监听 0.0.0.0（宿主机通过 -p 访问）；端口可用 SEQUOIA_PORT 覆盖
 ENV SEQUOIA_HOST=0.0.0.0 \
-    SEQUOIA_PORT=8000
+    SEQUOIA_PORT=7860
 
-EXPOSE 8000
+EXPOSE 7860
 
 CMD ["python", "webconsole/app.py"]
