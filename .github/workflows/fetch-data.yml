@@ -30,13 +30,19 @@ jobs:
           if git ls-remote --exit-code --heads origin data >/dev/null 2>&1; then
             echo "发现 data 分支，尝试恢复历史数据..."
             git fetch origin data --depth 1
-            if git cat-file -e "origin/data:data/sequoia_v2.tar.gz" 2>/dev/null; then
+            # 匹配单文件（旧版）或分卷（sequoia_v2.tar.gz.aa/.ab/...）
+            parts=$(git ls-tree -r --name-only origin/data data/ | grep -E '^data/sequoia_v2\.tar\.gz(\.[a-z]+)?$' || true)
+            if [ -n "$parts" ]; then
               mkdir -p data
-              git show "origin/data:data/sequoia_v2.tar.gz" > data/sequoia_v2.tar.gz
+              : > data/sequoia_v2.tar.gz
+              for p in $parts; do
+                git show "origin/data:$p" >> data/sequoia_v2.tar.gz
+              done
               tar -xzf data/sequoia_v2.tar.gz -C .
-              echo "已解压 data 分支历史数据到本地 data 目录"
+              rm -f data/sequoia_v2.tar.gz  # 只保留解压出的数据，避免下次压缩时嵌套旧压缩包
+              echo "已拼接并解压 data 分支历史数据到本地 data 目录"
             else
-              echo "data 分支上不存在 data/sequoia_v2.tar.gz，跳过恢复"
+              echo "data 分支上不存在 data/sequoia_v2.tar.gz 分卷，跳过恢复"
             fi
           else
             echo "data 分支不存在，跳过恢复"
@@ -62,10 +68,13 @@ jobs:
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL || 'https://example.invalid/dummy' }}
         run: uv run python main.py --backfill
 
-      - name: 校验数据文件并压缩 data 目录
+      - name: 校验数据文件并分卷压缩 data 目录
         run: |
           test -f data/sequoia_v2.db || { echo "data/sequoia_v2.db 不存在，终止"; exit 1; }
-          tar -czf "$RUNNER_TEMP/sequoia_v2.tar.gz" -C . data
+          mkdir -p "$RUNNER_TEMP/parts"
+          # 分成 90MB 的分卷（低于 GitHub 单文件 100MB 限制），生成 sequoia_v2.tar.gz.aa/.ab/...
+          tar -czf - -C . data | split -b 90m - "$RUNNER_TEMP/parts/sequoia_v2.tar.gz."
+          ls -lh "$RUNNER_TEMP"/parts
 
       - name: 推送到 data 分支的 data 目录
         env:
@@ -83,12 +92,12 @@ jobs:
             git checkout --orphan data
           fi
 
-          # 清空工作区，只保留本次快照
+          # 清空工作区，只保留本次快照（各分卷均低于 100MB，可正常推送）
           git rm -rf . >/dev/null 2>&1 || true
           mkdir -p data
-          cp "$RUNNER_TEMP/sequoia_v2.tar.gz" data/sequoia_v2.tar.gz
+          cp "$RUNNER_TEMP"/parts/sequoia_v2.tar.gz.* data/
 
-          git add data/sequoia_v2.tar.gz
+          git add data/
           if git diff --cached --quiet; then
             echo "数据无变化，跳过推送"
           else
