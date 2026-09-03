@@ -283,6 +283,8 @@ class DataEngine:
         if not refresh:
             # 读本地表，避免分析时联网
             with self._conn() as conn:
+                # 确保表存在（部署/在线库可能未经 _init_db 建表），幂等
+                conn.execute(_CREATE_NAME_TABLE_SQL)
                 rows = conn.execute("SELECT symbol, name FROM stock_names").fetchall()
             if rows:
                 names = dict(rows)
