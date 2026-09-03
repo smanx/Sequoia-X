@@ -72,8 +72,8 @@ jobs:
         run: |
           test -f data/sequoia_v2.db || { echo "data/sequoia_v2.db 不存在，终止"; exit 1; }
           mkdir -p "$RUNNER_TEMP/parts"
-          # 分成 90MB 的分卷（低于 GitHub 单文件 100MB 限制），生成 sequoia_v2.tar.gz.aa/.ab/...
-          tar -czf - -C . data | split -b 90m - "$RUNNER_TEMP/parts/sequoia_v2.tar.gz."
+          # 分成不超过 50MB 的分卷，生成 sequoia_v2.tar.gz.aa/.ab/...
+          tar -czf - -C . data | split -b 50m - "$RUNNER_TEMP/parts/sequoia_v2.tar.gz."
           ls -lh "$RUNNER_TEMP"/parts
 
       - name: 推送到 data 分支的 data 目录
@@ -96,8 +96,11 @@ jobs:
           git rm -rf . >/dev/null 2>&1 || true
           mkdir -p data
           cp "$RUNNER_TEMP"/parts/sequoia_v2.tar.gz.* data/
+          # 清除回填阶段残留在工作区的裸 .db（data 分支无 .gitignore，git rm 不删未跟踪文件，
+          # 否则裸库会随分卷一起被 add 提交，超出 GitHub 100MB 限制被拒）
+          rm -f data/*.db
 
-          git add data/
+          git add data/sequoia_v2.tar.gz.*
           if git diff --cached --quiet; then
             echo "数据无变化，跳过推送"
           else

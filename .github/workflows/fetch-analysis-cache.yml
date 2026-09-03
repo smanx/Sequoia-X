@@ -85,8 +85,8 @@ jobs:
         run: |
           test -f data/stock_cache.db || { echo "data/stock_cache.db 不存在，终止"; exit 1; }
           mkdir -p "$RUNNER_TEMP/parts"
-          # 分成 90MB 的分卷（低于 GitHub 单文件 100MB 限制），生成 stock_cache.tar.gz.aa/.ab/...
-          tar -czf - -C . data/stock_cache.db | split -b 90m - "$RUNNER_TEMP/parts/stock_cache.tar.gz."
+          # 分成不超过 50MB 的分卷（远低于 GitHub 单文件 100MB 上限），生成 stock_cache.tar.gz.aa/.ab/...
+          tar -czf - -C . data/stock_cache.db | split -b 50m - "$RUNNER_TEMP/parts/stock_cache.tar.gz."
           ls -lh "$RUNNER_TEMP"/parts
 
       - name: 推送到 cache 分支的 data 目录
@@ -107,8 +107,11 @@ jobs:
           git rm -rf . >/dev/null 2>&1 || true
           mkdir -p data
           cp "$RUNNER_TEMP"/parts/stock_cache.tar.gz.* data/
+          # 清除 restoration/分析阶段残留在工作区的裸 .db（cache 分支无 .gitignore，
+          # git rm 不删未跟踪文件，否则裸库会随分卷一起被提交而超出 GitHub 100MB 限制）
+          rm -f data/*.db
 
-          git add data/
+          git add data/stock_cache.tar.gz.*
           if git diff --cached --quiet; then
             echo "数据无变化，跳过推送"
           else
