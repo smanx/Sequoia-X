@@ -9,6 +9,7 @@
 启动：
   python app.py [port]      # 默认 8000，浏览器访问 http://127.0.0.1:8000
                              # 端口也可用环境变量 SEQUOIA_PORT 指定
+                             # 监听地址可用环境变量 SEQUOIA_HOST 覆盖（Docker 内设为 0.0.0.0）
                              # 优先级：命令行参数 > SEQUOIA_PORT 环境变量 > 默认 8000
 """
 
@@ -506,11 +507,11 @@ class Handler(BaseHTTPRequestHandler):
         print(f"[{self.address_string()}] {fmt % args}")
 
 
-def main(port: int = 8000) -> None:
+def main(port: int = 8000, host: str = "127.0.0.1") -> None:
     import signal
 
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    print(f"Sequoia-X Web 控制台已启动：http://127.0.0.1:{port}")
+    server = ThreadingHTTPServer((host, port), Handler)
+    print(f"Sequoia-X Web 控制台已启动：http://{host}:{port}")
     print("提示：首次使用请先在下方【数据更新】区从较早日期（如 2024-01-01）回填，")
     print("      为均线类策略预留足够历史，否则选中较早交易日时部分策略会因数据不足跳过。")
     print("按 Ctrl+C 或 Ctrl+Break 可安全停止服务。")
@@ -542,4 +543,6 @@ if __name__ == "__main__":
         port = int(sys.argv[1])
     else:
         port = int(os.environ.get("SEQUOIA_PORT", 8000))
-    main(port)
+    # 监听地址：默认仅本机，Docker 部署时通过 SEQUOIA_HOST=0.0.0.0 暴露给宿主机
+    host = os.environ.get("SEQUOIA_HOST", "127.0.0.1")
+    main(port, host)

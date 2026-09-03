@@ -1,0 +1,28 @@
+# 虚拟环境与 Python 缓存
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# 数据库文件：运行时通过 -v 挂载宿主机 data/ 目录提供，不进镜像
+data/
+
+# 日志
+*.log
+
+# 环境变量（本地配置，不入镜像）
+.env
+
+# IDE / 构建产物 / 测试缓存
+.idea/
+.vscode/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+
+# git 内部文件
+.git/
+.github/
