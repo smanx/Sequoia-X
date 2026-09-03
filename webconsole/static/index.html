@@ -171,6 +171,22 @@
   .cal-day.blank{cursor:default}
   .cal-day.other{color:var(--muted)}
   .cal-foot{margin-top:8px;text-align:center}
+
+  /* 批量获取 */
+  #batchCard{position:fixed;z-index:120;right:20px;top:20px;width:460px;max-width:94vw;
+    max-height:86vh;display:flex;flex-direction:column;gap:10px;background:var(--card);
+    border:1px solid var(--border);border-radius:14px;box-shadow:0 20px 60px rgba(0,0,0,.55);
+    padding:16px 18px}
+  .batch-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+  .batch-head h3{margin:0;font-size:14px}
+  #batchLog{max-height:50vh;font-family:ui-monospace,Consolas,monospace;font-size:12px;
+    line-height:1.6;padding:8px 10px}
+  .batch-log .ok{color:var(--good)}
+  .batch-log .fail{color:var(--bad)}
+  #batchDone{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding-top:6px;border-top:1px solid var(--border)}
+  .batch-done-tip{flex-basis:100%;color:var(--text);font-size:13px}
+  .batch-row{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}
+  .batch-hint{color:var(--muted);font-size:12px}
 </style>
 </head>
 <body>
@@ -266,6 +282,21 @@
   <div id="panels"></div>
 </div>
 
+<!-- 批量获取弹层 -->
+<div id="batchCard" style="display:none">
+  <div class="batch-head">
+    <h3 id="batchTitle">批量获取股票数据</h3>
+    <button class="cal-today" id="btnBatchClose">✕ 关闭</button>
+  </div>
+  <div id="batchLog" class="scroll batch-log"></div>
+  <div id="batchDone" style="display:none">
+    <div class="batch-done-tip">全部获取完毕，是否下载该数据或直接复制？</div>
+    <button class="btn-primary" id="btnBatchDownload">下载数据（JSON）</button>
+    <button class="btn-primary" id="btnBatchCopy">复制数据</button>
+    <span class="status" id="batchStatus"></span>
+  </div>
+</div>
+
 <!-- 日期选择弹层 -->
 <div id="calPop" style="display:none">
   <div class="cal-head">
@@ -294,6 +325,22 @@ const STRAT_FALLBACK = {
   UptrendLimitDownStrategy:{name:'UptrendLimitDown 上升跌停'},
   RpsBreakoutStrategy:{name:'RpsBreakout RPS突破'},
 };
+
+// 批量获取的股票数据项（与 stock.html 的 12 项一致）
+const BATCH_KINDS=[
+  {key:"dividend",title:"除权除息信息"},
+  {key:"adjust_factor",title:"复权因子信息"},
+  {key:"qfq",title:"本地计算前复权"},
+  {key:"profit",title:"季频盈利能力"},
+  {key:"operation",title:"季频营运能力"},
+  {key:"growth",title:"季频成长能力"},
+  {key:"balance",title:"季频偿债能力"},
+  {key:"cashflow",title:"季频现金流量"},
+  {key:"dupont",title:"季频杜邦指数"},
+  {key:"express",title:"季频业绩快报"},
+  {key:"forecast",title:"季频业绩预告"},
+  {key:"basic",title:"证券基本资料"},
+];
 
 async function jget(url){ const r=await fetch(url); return r.json(); }
 async function jpost(url,data){
@@ -343,6 +390,7 @@ function selectTab(key){
 }
 function renderTabs(keys,results,names,futures){
   futures=futures||{};
+  lastResults=results; lastNames=names||{};
   $('tabs').innerHTML=keys.map(k=>{
     const r=results[k]||{count:0};
     const meta=STRAT_FALLBACK[k]||{name:k};
@@ -355,7 +403,11 @@ function renderTabs(keys,results,names,futures){
     let body;
     if(r.error){ body=`<div class="none err">运行出错：${r.error}</div>`; }
     else{
-      body = statsBlock(r.stats, names) + resultTable(r, names, futures);
+      const batchBtn=(r.symbols&&r.symbols.length)
+        ?`<div class="batch-row"><button class="btn-primary" data-batch="${k}">获取本列表全部数据</button>`+
+         `<span class="batch-hint">串行获取本列表 ${r.symbols.length} 只股票的完整数据</span></div>`
+        :'';
+      body = batchBtn + statsBlock(r.stats, names) + resultTable(r, names, futures);
     }
     p.innerHTML=`<h3>${meta.name} <span style="color:var(--muted);font-size:12px">(${r.count||0})</span></h3>`+
       (r.desc?`<div class="desc">${r.desc}</div>`:'')+body;
@@ -365,6 +417,8 @@ function renderTabs(keys,results,names,futures){
   document.querySelectorAll('.tab').forEach(t=>{
     t.onclick=()=>selectTab(t.dataset.key);
   });
+  // 批量获取按钮
+  document.querySelectorAll('[data-batch]').forEach(b=>b.addEventListener('click',()=>openBatch(b.dataset.batch)));
   // 默认选中：优先保留上次选中的 tab（若仍在本次结果中），否则第一个
   selectTab(activeTab && keys.includes(activeTab) ? activeTab : keys[0]);
 }
@@ -521,6 +575,90 @@ function dayHasData(r){
   const res=r.results||{};
   return Object.values(res).some(x=>x && x.stats && (x.stats.total||0)>0);
 }
+
+// ── 列表页批量获取：一键拉取当前结果列表全部股票的完整数据（串行，实时日志）──
+let lastResults=null, lastNames={}, batchData={};
+function batchLog(log,html,cls){ const d=document.createElement('div'); d.className=cls||''; d.innerHTML=html; log.appendChild(d); }
+async function openBatch(key){
+  const rec=lastResults&&lastResults[key];
+  if(!rec || !rec.symbols || !rec.symbols.length){ setStatus('<span class="warn">当前列表无可获取的股票</span>'); return; }
+  const codes=rec.symbols;
+  const card=$('batchCard'); card.style.display='flex';
+  $('batchDone').style.display='none';
+  const log=$('batchLog'); log.innerHTML='';
+  $('batchStatus').innerHTML='';
+  $('batchTitle').textContent=`批量获取：${codes.length} 只股票 × ${BATCH_KINDS.length} 项数据（串行）`;
+  batchData={};
+  const total=codes.length*BATCH_KINDS.length;
+  let done=0, okCount=0, failCount=0;
+  batchLog(log,`开始获取 ${codes.length} 只股票…`);
+  for(let si=0; si<codes.length; si++){
+    const code=codes[si], nm=(lastNames&&lastNames[code])||'';
+    batchData[code]={};
+    for(const kd of BATCH_KINDS){
+      done++;
+      const line=document.createElement('div');
+      line.innerHTML=`<span class="warn">[${si+1}/${codes.length}]</span> ${code} ${nm} → ${kd.title} …`;
+      line.dataset.k=code+'|'+kd.key;
+      log.appendChild(line); log.scrollTop=log.scrollHeight;
+      try{
+        const r=await jpost('/api/stock/data',{code,kind:kd.key});
+        if(r && r.ok!==false && r.fields){
+          batchData[code][kd.key]={fields:r.fields,rows:r.rows};
+          okCount++; line.innerHTML=`<span class="ok">[${si+1}/${codes.length}]</span> ${code} ${nm} → ${kd.title} <span class="ok">成功</span>`;
+        }else{
+          batchData[code][kd.key]=null; failCount++;
+          line.innerHTML=`<span class="warn">[${si+1}/${codes.length}]</span> ${code} ${nm} → ${kd.title} <span class="fail">失败：${(r&&r.error)||(r&&r.msg)||'无数据'}</span>`;
+        }
+      }catch(e){
+        batchData[code][kd.key]=null; failCount++;
+        line.innerHTML=`<span class="warn">[${si+1}/${codes.length}]</span> ${code} ${nm} → ${kd.title} <span class="fail">异常：${e.message}</span>`;
+      }
+      log.scrollTop=log.scrollHeight;
+    }
+  }
+  batchLog(log,`<b>完成：共 ${total} 项，成功 ${okCount}，失败 ${failCount}</b>`);
+  window._batchData=batchData;
+  $('batchDone').style.display='flex';
+}
+function batchToText(){
+  const codes=Object.keys(batchData); const out=[];
+  out.push(`共 ${codes.length} 只股票；数据项：${BATCH_KINDS.map(k=>k.title).join('、')}`);
+  for(const code of codes){
+    const nm=(lastNames&&lastNames[code])||'';
+    out.push(''); out.push(`股票代码：${code}   股票名称：${nm}`);
+    for(const kd of BATCH_KINDS){
+      const d=batchData[code]&&batchData[code][kd.key];
+      if(!d || !d.fields){ out.push(`【${kd.title}】（未获取到）`); continue; }
+      out.push(`【${kd.title}】`);
+      d.fields.forEach(f=>{ const fh=FIELD_HELP_BATCH[kd.key]||{}; out.push(`  列 ${f}：${fh[f]||'(暂无说明)'}`); });
+      if(d.rows && d.rows.length) d.rows.forEach(r=>out.push('  '+r.join('\t')));
+      else out.push('  （无数据）');
+    }
+  }
+  return out.join('\n');
+}
+// 供复制用的字段说明（仅用于文本；若未内置则显示占位）
+const FIELD_HELP_BATCH={};
+function downloadBatch(){
+  const blob=new Blob([JSON.stringify(window._batchData||batchData,null,1)],{type:'application/json'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+  a.download=`batch_${new Date().toISOString().slice(0,10)}.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+}
+async function copyBatch(){
+  const text=batchToText();
+  try{ await navigator.clipboard.writeText(text); $('batchStatus').textContent='已复制到剪贴板'; $('batchStatus').className='status ok'; }
+  catch(e){
+    const ta=document.createElement('textarea'); ta.value=text; document.body.appendChild(ta);
+    ta.select(); try{ document.execCommand('copy'); $('batchStatus').textContent='已复制到剪贴板'; $('batchStatus').className='status ok'; }
+    catch(_e){ $('batchStatus').textContent='复制失败：'+e.message; $('batchStatus').className='status err'; }
+    ta.remove();
+  }
+}
+$('btnBatchClose').onclick=()=>{ $('batchCard').style.display='none'; };
+$('btnBatchDownload').onclick=downloadBatch;
+$('btnBatchCopy').onclick=copyBatch;
 
 // ── 日期弹框选择器（点击 .dp 弹出月历，快速选年月日）──
 let calFor=null, calY=0, calM=0;

@@ -345,7 +345,7 @@ def _year_range() -> range:
 def _query_kind(bs, bscode: str, kind: str) -> tuple[list, list]:
     """执行某一种类的查询，返回 (fields, rows)。kind 必须是 STOCK_KINDS_MAP 的 key。"""
     if kind in ("profit", "operation", "growth", "balance", "cashflow",
-                "dupont", "express", "forecast"):
+                "dupont"):
         # 季频类：按 (年, 季度) 循环，跨年合并
         fn = {
             "profit": bs.query_profit_data,
@@ -354,8 +354,6 @@ def _query_kind(bs, bscode: str, kind: str) -> tuple[list, list]:
             "balance": bs.query_balance_data,
             "cashflow": bs.query_cash_flow_data,
             "dupont": bs.query_dupont_data,
-            "express": bs.query_performance_express_report,
-            "forecast": bs.query_forecast_report,
         }[kind]
         all_fields, all_rows = None, []
         for year in _year_range():
@@ -367,6 +365,16 @@ def _query_kind(bs, bscode: str, kind: str) -> tuple[list, list]:
                 all_fields = fields or all_fields
                 all_rows.extend(rows)
         return all_fields or [], all_rows
+
+    if kind in ("express", "forecast"):
+        # 业绩快报 / 业绩预告：按"发布日期范围"查询，不传 year/quarter
+        fn = {
+            "express": bs.query_performance_express_report,
+            "forecast": bs.query_forecast_report,
+        }[kind]
+        rs = fn(bscode, start_date=f"{min(_year_range())}-01-01", end_date=_today())
+        fields, rows = _collect_rs(rs)
+        return fields, rows[-_RS_LIMIT:]
 
     if kind == "dividend":
         # 除权除息：按"实际除权除息年份"逐年查询
