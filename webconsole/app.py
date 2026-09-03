@@ -52,7 +52,18 @@ STATIC_DIR = BASE_DIR / "static"
 ONLINE_ZIP_URL = "https://github.com/smanx/Sequoia-X/archive/refs/heads/data.zip"
 # 在线数据源落盘路径：解压出的 db 单独存放，避免覆盖本地默认库
 ONLINE_DB_PATH = str((BASE_DIR.parent / "data" / "sequoia_online_v2.db").resolve())
+# 在线数据源下载包的缓存目录：master.zip 落盘缓存，后续切换/获取直接复用，避免重复下载
+ONLINE_CACHE_DIR = str((BASE_DIR.parent / "data" / "online_cache").resolve())
+ONLINE_CACHE_ZIP = os.path.join(ONLINE_CACHE_DIR, "master.zip")
 _DATASOURCE = {"source": "local"}
+
+# ── 在线缓存：个股数据缓存（stock_cache.db）也可从 GitHub cache 分支拉取 / 切换 ──
+ONLINE_CACHE_ZIP_URL = "https://github.com/smanx/Sequoia-X/archive/refs/heads/cache.zip"
+# 在线缓存单独落盘，避免覆盖本地缓存库
+ONLINE_STOCK_CACHE_PATH = str((BASE_DIR.parent / "data" / "stock_cache_online.db").resolve())
+# 本地默认缓存路径：获取在线缓存前先判断本地是否已有数据
+LOCAL_STOCK_CACHE_PATH = str((BASE_DIR.parent / "data" / "stock_cache.db").resolve())
+_CACHE_SOURCE = "local"  # local=本地缓存，online=在线缓存
 
 # ── Web Basic 认证：默认 admin/admin，可用环境变量 SEQUOIA_USER / SEQUOIA_PASS 修改 ──
 AUTH_USER = os.environ.get("SEQUOIA_USER", "admin")
@@ -137,11 +148,18 @@ def get_engine():
 
 
 def set_datasource(source: str | None) -> str:
-    """切换数据源：local=本地默认库，online=在线下载库。变化时重建引擎连接。"""
+    """切换数据源：local=本地默认库，online=在线下载库。变化时重建引擎连接。
+
+    切到在线时：若在线库尚未就绪但已缓存下载包（data/online_cache/master.zip），
+    则直接解压缓存包得到在线库，避免重复下载。
+    """
     global _engine
     source = source if source in ("local", "online") else "local"
     if source != _DATASOURCE["source"]:
         _DATASOURCE["source"] = source
+        # 切到在线若有缓存包且在线库未就绪，自动解压复用
+        if source == "online" and not online_ready() and os.path.isfile(ONLINE_CACHE_ZIP):
+            _extract_online_source(ONLINE_CACHE_ZIP)
         _engine = None  # 下次 get_engine 用新库重建连接
     return source
 
@@ -184,13 +202,24 @@ def _download_stream(url: str, dest: str, chunk: int = 1024 * 256) -> None:
 
 
 def fetch_online_source() -> str:
-    """获取在线数据源：下载 master.zip -> 解压 -> 拼接分卷 -> 解 tar.gz -> 取得 db。
+    """获取在线数据源：优先复用本地缓存包，否则下载 -> 解压 -> 拼分卷 -> 解 tar.gz -> 得到 db。
 
+    下载过的 master.zip 会缓存到 data/online_cache/，后续获取不再重复下载。
     分卷命名参考 .github/workflows/fetch-data.yml：
       打包: tar -czf - -C . data | split -b 90m - sequoia_v2.tar.gz.
       解包: 拼接所有 data/sequoia_v2.tar.gz.* 分卷 → tar.gz → 解出 data/sequoia_v2.db
     Returns: 在线数据源 db 的落盘路径。
     """
+    # 已有缓存包则直接复用（解压），否则下载到缓存目录
+    if os.path.isfile(ONLINE_CACHE_ZIP):
+        return _extract_online_source(ONLINE_CACHE_ZIP)
+    os.makedirs(ONLINE_CACHE_DIR, exist_ok=True)
+    _download_stream(ONLINE_ZIP_URL, ONLINE_CACHE_ZIP)
+    return _extract_online_source(ONLINE_CACHE_ZIP)
+
+
+def _extract_online_source(zip_path: str) -> str:
+    """从本地缓存的 master.zip 中解出在线数据库 db：解 zip -> 拼分卷 -> 解 tar.gz -> 取得 db。"""
     import glob
     import shutil
     import tarfile
@@ -199,9 +228,6 @@ def fetch_online_source() -> str:
 
     tmp = tempfile.mkdtemp(prefix="seq_online_")
     try:
-        zip_path = os.path.join(tmp, "master.zip")
-        _download_stream(ONLINE_ZIP_URL, zip_path)
-
         with zipfile.ZipFile(zip_path) as z:
             top = z.namelist()[0].split("/")[0] if z.namelist() else ""
             z.extractall(tmp)
@@ -242,6 +268,80 @@ def fetch_online_source() -> str:
         return ONLINE_DB_PATH
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def fetch_online_cache(log: list | None = None) -> str:
+    """获取在线缓存：下载 cache 分支 zip -> 解 zip -> 拼接 stock_cache.tar.gz 分卷 -> 解 tar.gz -> 得 stock_cache.db。
+
+    结果单独落盘到 ONLINE_STOCK_CACHE_PATH（不覆盖本地缓存），并自动切到在线缓存源。
+    log 传入列表时会把每个步骤的明细追加进去（供前端展示）。
+    Returns: 在线缓存 db 的落盘路径。
+    """
+    if log is None:
+        log = []
+
+    def note(msg: str) -> None:
+        log.append(msg)
+        print(f"[online-cache] {msg}")
+
+    import glob as _glob
+    import shutil as _shutil
+    import tarfile as _tarfile
+    import tempfile as _tempfile
+    import zipfile as _zipfile
+
+    tmp = _tempfile.mkdtemp(prefix="seq_cache_")
+    try:
+        zip_path = os.path.join(tmp, "cache.zip")
+        note("开始下载 cache 分支压缩包…")
+        _download_stream(ONLINE_CACHE_ZIP_URL, zip_path)
+        note(f"下载完成：{os.path.getsize(zip_path) / 1048576:.1f} MB，解压 zip…")
+
+        with _zipfile.ZipFile(zip_path) as z:
+            top = z.namelist()[0].split("/")[0] if z.namelist() else ""
+            z.extractall(tmp)
+        note("zip 解压完毕")
+
+        src_data = os.path.join(tmp, top, "data")
+        parts = sorted(_glob.glob(os.path.join(src_data, "stock_cache.tar.gz.*")))
+        # 兼容无分卷的情况：单文件 tar.gz 或直接裸 db
+        if not parts:
+            single = os.path.join(src_data, "stock_cache.tar.gz")
+            direct = os.path.join(src_data, "stock_cache.db")
+            if os.path.isfile(single):
+                parts = [single]
+            elif os.path.isfile(direct):
+                note("数据目录为裸 stock_cache.db，直接复制到在线缓存库")
+                os.makedirs(os.path.dirname(ONLINE_STOCK_CACHE_PATH), exist_ok=True)
+                _shutil.copy(direct, ONLINE_STOCK_CACHE_PATH)
+                set_cache_source("online")
+                note(f"复制完成：{_cache_rows(ONLINE_STOCK_CACHE_PATH)} 条缓存")
+                return ONLINE_STOCK_CACHE_PATH
+            else:
+                raise FileNotFoundError("cache 分支未找到缓存分卷(stock_cache.tar.gz.*)")
+
+        note(f"找到 {len(parts)} 个分卷，开始拼接…")
+        tar_path = os.path.join(tmp, "stock_cache.tar.gz")
+        with open(tar_path, "wb") as out:
+            for i, p in enumerate(parts, 1):
+                with open(p, "rb") as f:
+                    _shutil.copyfileobj(f, out)
+                note(f"拼接分卷 {i}/{len(parts)}：{os.path.basename(p)}")
+        note("分卷拼接完成，解压 tar.gz…")
+        with _tarfile.open(tar_path, "r:gz") as t:
+            t.extractall(tmp)
+        db = os.path.join(tmp, "data", "stock_cache.db")
+        if not os.path.isfile(db):
+            raise FileNotFoundError("解压后未找到 stock_cache.db")
+        note("tar.gz 解压完成")
+
+        os.makedirs(os.path.dirname(ONLINE_STOCK_CACHE_PATH), exist_ok=True)
+        _shutil.copy(db, ONLINE_STOCK_CACHE_PATH)
+        set_cache_source("online")  # 获取成功后自动切到在线缓存
+        note(f"已复制到在线缓存库，共 {_cache_rows(ONLINE_STOCK_CACHE_PATH)} 条缓存")
+        return ONLINE_STOCK_CACHE_PATH
+    finally:
+        _shutil.rmtree(tmp, ignore_errors=True)
 
 
 def get_strategies() -> dict:
@@ -453,12 +553,75 @@ def _query_kind(bs, bscode: str, kind: str, as_of: str | None = None) -> tuple[l
 
 
 def _get_stock_cache() -> cache_mod.StockCache:
-    """惰性创建个股数据缓存（独立缓存库，不影响主行情库）。"""
+    """惰性创建个股数据缓存（独立缓存库，不影响主行情库）。
+
+    local=本地 data/stock_cache.db，online=在线 stock_cache_online.db（从 cache 分支获取）。
+    """
     global _STOCK_CACHE
     if _STOCK_CACHE is None:
-        path = str((BASE_DIR.parent / "data" / "stock_cache.db").resolve())
+        if _CACHE_SOURCE == "online":
+            path = ONLINE_STOCK_CACHE_PATH
+        else:
+            path = str((BASE_DIR.parent / "data" / "stock_cache.db").resolve())
         _STOCK_CACHE = cache_mod.StockCache(path, ttl=_CACHE_TTL)
     return _STOCK_CACHE
+
+
+def set_cache_source(source: str | None) -> str:
+    """切换缓存源：local=本地缓存，online=在线缓存。变化时重建缓存实例（关闭旧连接）。"""
+    global _CACHE_SOURCE, _STOCK_CACHE
+    source = source if source in ("local", "online") else "local"
+    if source != _CACHE_SOURCE:
+        _CACHE_SOURCE = source
+        if _STOCK_CACHE is not None:
+            try:
+                _STOCK_CACHE.close()
+            except Exception:  # noqa: BLE001
+                pass
+            _STOCK_CACHE = None  # 下次 _get_stock_cache 按新源重建
+    return source
+
+
+def _cache_rows(path: str) -> int:
+    """返回某个缓存库里 stock_cache 表的数据条数（文件不存在/损坏则 0）。"""
+    if not os.path.exists(path):
+        return 0
+    try:
+        conn = sqlite3.connect(path)
+        n = conn.execute("SELECT COUNT(*) FROM stock_cache").fetchone()[0]
+        conn.close()
+        return n or 0
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def cache_online_ready() -> bool:
+    """在线缓存是否已获取：在线缓存文件存在且 stock_cache 表有数据。"""
+    if not os.path.exists(ONLINE_STOCK_CACHE_PATH):
+        return False
+    try:
+        conn = sqlite3.connect(ONLINE_STOCK_CACHE_PATH)
+        n = conn.execute("SELECT COUNT(*) FROM stock_cache").fetchone()[0]
+        conn.close()
+        return n > 0
+    except Exception:  # noqa: BLE001  (表不存在/损坏等一律视为未获取)
+        return False
+
+
+def get_cache_info() -> dict:
+    """返回当前缓存源的统计信息（条数、覆盖股票数），供前端展示。"""
+    path = ONLINE_STOCK_CACHE_PATH if _CACHE_SOURCE == "online" else str(
+        (BASE_DIR.parent / "data" / "stock_cache.db").resolve()
+    )
+    if not os.path.exists(path):
+        return {"rows": 0, "keys": 0}
+    try:
+        conn = sqlite3.connect(path)
+        row = conn.execute("SELECT COUNT(*), COUNT(DISTINCT code) FROM stock_cache").fetchone()
+        conn.close()
+        return {"rows": row[0] or 0, "keys": row[1] or 0}
+    except Exception:  # noqa: BLE001
+        return {"rows": 0, "keys": 0}
 
 
 def _ensure_bs_login():
@@ -602,6 +765,15 @@ class Handler(BaseHTTPRequestHandler):
                 })
             except Exception as exc:  # noqa: BLE001
                 self._send(500, {"error": str(exc)})
+        elif path == "/api/online-cache":
+            try:
+                self._send(200, {
+                    "source": _CACHE_SOURCE,
+                    "online_ready": cache_online_ready(),
+                    "info": get_cache_info(),
+                })
+            except Exception as exc:  # noqa: BLE001
+                self._send(500, {"error": str(exc)})
         else:
             self._send(404, {"error": f"unknown path {path}"}, "text/plain")
 
@@ -660,6 +832,48 @@ class Handler(BaseHTTPRequestHandler):
                     "size": _P(db).stat().st_size,
                     "elapsed": round(time.time() - t0, 1),
                     "info": info,
+                })
+            except AnalysisCanceled as exc:
+                self._send(200, {"ok": False, "canceled": True, "error": str(exc)})
+            except Exception as exc:  # noqa: BLE001
+                self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/online-cache":
+            # 切换缓存源：local=本地缓存，online=在线缓存
+            source = set_cache_source(data.get("source"))
+            try:
+                self._send(200, {
+                    "ok": True, "source": source, "online_ready": cache_online_ready(),
+                    "info": get_cache_info(),
+                })
+            except Exception as exc:  # noqa: BLE001
+                self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/online-cache/fetch":
+            # 获取在线缓存：规则是先看本地缓存，本地已有数据则无需再取在线缓存；
+            # 仅当本地无数据时才从 cache 分支下载并解压。每一步都输出明细日志。
+            try:
+                t0 = time.time()
+                log: list = []
+                local_rows = _cache_rows(LOCAL_STOCK_CACHE_PATH)
+                if local_rows and local_rows > 0:
+                    log.append(f"本地缓存已有 {local_rows} 条数据，无需获取在线缓存，跳过下载")
+                    print(f"[online-cache] {log[-1]}")
+                    self._send(200, {
+                        "ok": True, "skipped": True, "source": _CACHE_SOURCE,
+                        "local_rows": local_rows, "log": log,
+                    })
+                    return
+                log.append(f"本地缓存无数据，开始获取在线缓存（{LOCAL_STOCK_CACHE_PATH}）")
+                db = fetch_online_cache(log)
+                from pathlib import Path as _P
+                self._send(200, {
+                    "ok": True, "source": "online", "db": db,
+                    "size": _P(db).stat().st_size,
+                    "elapsed": round(time.time() - t0, 1),
+                    "online_ready": cache_online_ready(),
+                    "info": get_cache_info(),
+                    "log": log,
                 })
             except AnalysisCanceled as exc:
                 self._send(200, {"ok": False, "canceled": True, "error": str(exc)})

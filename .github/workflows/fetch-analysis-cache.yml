@@ -1,0 +1,117 @@
+name: Fetch Analysis Cache & Push
+
+# 触发方式：手动触发 + 每天中国时间 16:30（= UTC 08:30）定时触发
+# 启动后在 Python 脚本内按北京时间判断：16 点前取上一工作日，16 点后取当天（未开市则取上一工作日）。
+"on":
+  workflow_dispatch:
+  schedule:
+    - cron: "30 8 * * *"
+
+# 需要向 cache 分支推送代码，授予 contents 写权限
+permissions:
+  contents: write
+
+concurrency:
+  group: fetch-analysis-cache
+  cancel-in-progress: false
+
+jobs:
+  fetch-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 恢复市场库（data 分支）
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin data >/dev/null 2>&1; then
+            git fetch origin data --depth 1
+            parts=$(git ls-tree -r --name-only origin/data data/ | grep -E '^data/sequoia_v2\.tar\.gz(\.[a-z]+)?$' || true)
+            if [ -n "$parts" ]; then
+              mkdir -p data
+              : > data/sequoia_v2.tar.gz
+              for p in $parts; do
+                git show "origin/data:$p" >> data/sequoia_v2.tar.gz
+              done
+              tar -xzf data/sequoia_v2.tar.gz -C .
+              rm -f data/sequoia_v2.tar.gz
+              echo "已从 data 分支恢复市场库"
+            else
+              echo "data 分支没有市场库分卷，跳过恢复"
+            fi
+          fi
+
+      - name: 恢复缓存（cache 分支）
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin cache >/dev/null 2>&1; then
+            git fetch origin cache --depth 1
+            parts=$(git ls-tree -r --name-only origin/cache data/ | grep -E '^data/stock_cache\.tar\.gz(\.[a-z]+)?$' || true)
+            if [ -n "$parts" ]; then
+              mkdir -p data
+              : > data/stock_cache.tar.gz
+              for p in $parts; do
+                git show "origin/cache:$p" >> data/stock_cache.tar.gz
+              done
+              tar -xzf data/stock_cache.tar.gz -C .
+              rm -f data/stock_cache.tar.gz
+              echo "已从 cache 分支恢复个股数据缓存"
+            else
+              echo "cache 分支没有缓存分卷，跳过恢复"
+            fi
+          else
+            echo "cache 分支不存在，跳过恢复（首次运行将新建）"
+          fi
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装 uv 与依赖
+        run: |
+          pip install uv
+          uv sync --frozen
+
+      - name: 自动分析并补齐缓存（最多 5 小时 50 分钟）
+        # Python 内置时间预算留出压缩/推送的余量；到点由本步骤的 timeout 强停进程树，
+        # continue-on-error 让后续压缩/推送照常执行（上传已有的、可能是部分的数据）。
+        timeout-minutes: 350
+        continue-on-error: true
+        run: uv run python webconsole/auto_cache.py
+
+      - name: 校验缓存文件并分卷压缩
+        run: |
+          test -f data/stock_cache.db || { echo "data/stock_cache.db 不存在，终止"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/parts"
+          # 分成 90MB 的分卷（低于 GitHub 单文件 100MB 限制），生成 stock_cache.tar.gz.aa/.ab/...
+          tar -czf - -C . data/stock_cache.db | split -b 90m - "$RUNNER_TEMP/parts/stock_cache.tar.gz."
+          ls -lh "$RUNNER_TEMP"/parts
+
+      - name: 推送到 cache 分支的 data 目录
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git ls-remote --exit-code --heads origin cache >/dev/null 2>&1; then
+            git fetch origin cache --depth 1
+            git checkout -B cache origin/cache
+          else
+            git checkout --orphan cache
+          fi
+
+          git rm -rf . >/dev/null 2>&1 || true
+          mkdir -p data
+          cp "$RUNNER_TEMP"/parts/stock_cache.tar.gz.* data/
+
+          git add data/
+          if git diff --cached --quiet; then
+            echo "数据无变化，跳过推送"
+          else
+            git commit -m "chore(cache): update stock data cache snapshot"
+            git push origin cache
+          fi

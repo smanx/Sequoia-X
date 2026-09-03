@@ -219,7 +219,17 @@
       <button class="btn-primary" id="btnDsFetch" style="display:none">获取在线数据源</button>
       <div id="dsStatus" class="hint" style="margin-top:6px;flex-basis:100%"></div>
     </div>
-    <div class="hint">本地数据源为当前 `data/sequoia_v2.db`；切换到在线数据源后，点"获取在线数据源"从 GitHub 下载打包的分卷数据库（`sequoia_v2.tar.gz.aa/.ab/...`）并解压到本地单独存放，不影响本地默认库。</div>
+    <div class="row" style="margin-top:14px">
+      <div class="field"><label>数据缓存</label>
+        <select id="csSel" class="sel">
+          <option value="local" selected>本地缓存</option>
+          <option value="online">在线缓存</option>
+        </select>
+      </div>
+      <button class="btn" id="btnCsFetch" style="display:none">获取在线缓存</button>
+      <div id="csStatus" class="hint" style="margin-top:6px;flex-basis:100%"></div>
+    </div>
+    <div class="hint">本地数据源为当前 `data/sequoia_v2.db`；切换到在线数据源后，点"获取在线数据源"从 GitHub 下载打包的分卷数据库（`sequoia_v2.tar.gz.aa/.ab/...`）并解压到本地单独存放，不影响本地默认库。"数据缓存"同理：在线缓存从 cache 分支下载 `stock_cache.tar.gz.*` 解压到单独的在线缓存库，切换后个股数据查询会复用该预取缓存。</div>
   </div>
 
   <!-- 数据更新 -->
@@ -947,9 +957,64 @@ btnDsFetch.onclick=async ()=>{
   finally{ btnDsFetch.disabled=false; }
 };
 
+// ── 在线缓存切换（个股数据缓存）：local=本地缓存，online=在线缓存 ──
+const csSel=$('csSel'), btnCsFetch=$('btnCsFetch'), csStatus=$('csStatus');
+function syncCsBtn(){ btnCsFetch.style.display=csSel.value==='online'?'':'none'; }
+function csMsg(html){ csStatus.innerHTML=html; }
+async function loadCache(){
+  try{
+    const r=await jget('/api/online-cache');
+    csSel.value=(r&&r.source)||'local'; syncCsBtn();
+    const info=(r&&r.info)||{};
+    csMsg(`当前：<b style="color:var(--accent2)">${(r&&r.source)==='online'?'在线缓存':'本地缓存'}</b>（${info.keys||0} 只股票 / ${info.rows||0} 条）`+
+      ((r&&r.source)==='online'&&!(r&&r.online_ready)?'（尚未获取，请点「获取在线缓存」）':''));
+  }catch(e){ csMsg(`<span class="err">读取缓存状态失败：${e.message}</span>`); }
+}
+csSel.onchange=async ()=>{
+  const v=csSel.value; csSel.disabled=true;
+  try{
+    const r=await jpost('/api/online-cache',{source:v});
+    if(r.ok){
+      csSel.value=r.source; syncCsBtn();
+      const info=(r&&r.info)||{};
+      csMsg(`已切换缓存：<b style="color:var(--accent2)">${r.source==='online'?'在线':'本地'}</b>`+
+        `（${info.keys||0} 只 / ${info.rows||0} 条）`+
+        (r.source==='online'&&!(r&&r.online_ready)?'（尚未获取，请点「获取在线缓存」）':''));
+    }else csMsg(`<span class="err">切换失败：${r.error||'未知'}</span>`);
+  }catch(e){ csMsg(`<span class="err">切换失败：${e.message}</span>`); }
+  finally{ csSel.disabled=false; }
+};
+// 把后端返回的明细日志逐行渲染到状态区
+function renderLogLines(r){
+  const lines=(r&&r.log)||[];
+  if(!lines.length) return '';
+  return '<div style="line-height:1.7;font-size:12px;color:var(--muted)">'+
+    lines.map(l=>{const d=document.createElement('div'); d.textContent=l; return d.outerHTML;}).join('')+'</div>';
+}
+btnCsFetch.onclick=async ()=>{
+  btnCsFetch.disabled=true;
+  csMsg('<span class="spin"></span>先检查本地缓存，判断是否需要获取在线缓存...');
+  try{
+    const r=await jpost('/api/online-cache/fetch',{});
+    if(r.ok){
+      if(r.skipped){
+        // 本地已有数据，跳过获取；不切换缓存源
+        csSel.value=(r&&r.source)||'local'; syncCsBtn();
+        csMsg(`<span class="warn">本地缓存已有 ${r.local_rows||0} 条数据，无需获取在线缓存（已跳过）</span>`+renderLogLines(r));
+      }else{
+        csSel.value='online'; syncCsBtn();
+        const info=(r&&r.info)||{};
+        csMsg(`<span class="ok">在线缓存获取完成：${(r.size/1048576).toFixed(1)}MB，用时 ${r.elapsed}s（${info.keys||0} 只 / ${info.rows||0} 条），当前为在线缓存</span>`+renderLogLines(r));
+      }
+    }else csMsg(r.canceled?`<span class="warn">获取已取消</span>`:`<span class="err">获取失败：${r.error||'未知'}</span>`);
+  }catch(e){ csMsg(`<span class="err">获取失败：${e.message}</span>`); }
+  finally{ btnCsFetch.disabled=false; }
+};
+
 refreshInfo();
 renderChecks();
 loadDs();
+loadCache();
 </script>
 </body>
 </html>
