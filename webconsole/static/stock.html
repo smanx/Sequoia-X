@@ -58,6 +58,8 @@
     <span style="color:var(--muted);font-size:12px">数据来源：baostock</span>
   </div>
   <div class="fetch-all-row">
+    <label class="asof-label" for="asOfDate">数据截止日期</label>
+    <input type="date" id="asOfDate" title="数据截止日期：为空则取最新；填写则可查看该历史时点的数据，可与分析日期对齐">
     <button class="btn btn-primary" id="btnAll">获取全部数据</button>
     <button class="btn" id="btnXq">雪球 K 线</button>
     <button class="btn" id="btnCopy">一键复制所有数据</button>
@@ -84,6 +86,7 @@ const KINDS=[
 const $=id=>document.getElementById(id);
 const qs=new URLSearchParams(location.search);
 const CODE=qs.get('code')||'', NAME=qs.get('name')||'';
+const ASOF=qs.get('as_of')||'';
 const DATA={};  // 已获取的数据项缓存：{ key: {fields, rows} }
 
 // 每个卡片条目(数据源)的用途说明 —— 悬停在卡片标题上显示
@@ -258,7 +261,8 @@ async function fetchKind(key, silent){
   setStatus(key,'<span class="mini-spin"></span>请求中…','loading');
   if(!silent){ $('allStatus').innerHTML=''; }
   try{
-    const r=await jpost('/api/stock/data',{code:CODE,kind:key});
+    const as_of=$('asOfDate').value||'';
+    const r=await jpost('/api/stock/data',{code:CODE,kind:key,as_of});
     if(r.ok!==false && r.fields){
       setStatus(key,'成功','ok');
       $('bd_'+key).innerHTML=buildTable(r.fields,r.rows,key);
@@ -340,6 +344,7 @@ async function copyAll(){
 function init(){
   $('code').textContent=CODE;
   $('name').textContent=NAME||'个股';
+  if(ASOF){ $('asOfDate').value=ASOF; }  // 从分析列表点入时预填数据截止日期
   $('btnXq').addEventListener('click',()=>{
     window.open('https://xueqiu.com/S/'+toXueqiuCode(CODE),'_blank');
   });

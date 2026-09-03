@@ -17,6 +17,7 @@ import base64
 import hmac
 import importlib
 import json
+import logging
 import os
 import sqlite3
 import sys
@@ -40,8 +41,10 @@ _DAY_WORKERS = 2        # 范围分析中并行处理的交易日数
 # 用「模块引用」方式导入（而非 from ... import 类），以支持热重载
 import engine as engine_mod
 import strategies as strategies_mod
+import cache as cache_mod
 
-logger = engine_mod.get_logger(__name__)
+logger = logging.getLogger("sequoia-webconsole")
+logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 
@@ -322,6 +325,15 @@ STOCK_KINDS_MAP = {k["key"]: k["title"] for k in STOCK_KINDS}
 _QY_MAX = 12
 _RS_LIMIT = 250
 
+# 个股数据查询的本地缓存：默认 7 天 TTL，可用环境变量 STOCK_CACHE_TTL（秒）覆盖
+_CACHE_TTL = int(os.environ.get("STOCK_CACHE_TTL", str(7 * 86400)))
+_STOCK_CACHE = None  # 惰性初始化的 StockCache 实例
+
+# baostock 单一全局会话：只登录一次复用，不每次 login/logout。
+# 所有 baostock 会话级操作（登录/查询）用同一把锁串行化，避免多线程并发串包。
+_BS_LOCK = threading.Lock()
+_BS_LOGGED_IN = False
+
 
 def _collect_rs(rs):
     """把 baostock 结果集收成 (fields, rows)。字段用返回结果动态命名，不硬编码。"""
@@ -336,14 +348,25 @@ def _today() -> str:
     return time.strftime("%Y-%m-%d")
 
 
-def _year_range() -> range:
-    """回溯 _QY_MAX 年到当前年。"""
-    y0 = int(time.strftime("%Y"))
+def _asof_info(as_of: str | None) -> tuple[int, str]:
+    """按 as_of（数据截止日期）返回 (截止年份, 截止日期)。as_of 为空则用今天。"""
+    d = (as_of or "").strip() or _today()
+    return int(d[:4]), d
+
+
+def _year_range(asof_year: int | None = None) -> range:
+    """回溯 _QY_MAX 年到指定年份（默认当前年）。"""
+    y0 = asof_year if asof_year is not None else int(time.strftime("%Y"))
     return range(y0 - _QY_MAX + 1, y0 + 1)
 
 
-def _query_kind(bs, bscode: str, kind: str) -> tuple[list, list]:
-    """执行某一种类的查询，返回 (fields, rows)。kind 必须是 STOCK_KINDS_MAP 的 key。"""
+def _query_kind(bs, bscode: str, kind: str, as_of: str | None = None) -> tuple[list, list]:
+    """执行某一种类的查询，返回 (fields, rows)。kind 必须是 STOCK_KINDS_MAP 的 key。
+
+    as_of 为数据截止日期：季频/除权回溯到该年，区间类查询到该截止日。
+    传入 as_of 可查看某个历史时点的数据（与分析日期对齐）；不传则取到今天。
+    """
+    asof_year, asof_date = _asof_info(as_of)
     if kind in ("profit", "operation", "growth", "balance", "cashflow",
                 "dupont"):
         # 季频类：按 (年, 季度) 循环，跨年合并
@@ -356,7 +379,7 @@ def _query_kind(bs, bscode: str, kind: str) -> tuple[list, list]:
             "dupont": bs.query_dupont_data,
         }[kind]
         all_fields, all_rows = None, []
-        for year in _year_range():
+        for year in _year_range(asof_year):
             for quarter in range(1, 5):
                 rs = fn(code=bscode, year=str(year), quarter=str(quarter))
                 if rs.error_code != "0":
@@ -372,14 +395,14 @@ def _query_kind(bs, bscode: str, kind: str) -> tuple[list, list]:
             "express": bs.query_performance_express_report,
             "forecast": bs.query_forecast_report,
         }[kind]
-        rs = fn(bscode, start_date=f"{min(_year_range())}-01-01", end_date=_today())
+        rs = fn(bscode, start_date=f"{min(_year_range(asof_year))}-01-01", end_date=asof_date)
         fields, rows = _collect_rs(rs)
         return fields, rows[-_RS_LIMIT:]
 
     if kind == "dividend":
         # 除权除息：按"实际除权除息年份"逐年查询
         all_fields, all_rows = None, []
-        for year in _year_range():
+        for year in _year_range(asof_year):
             rs = bs.query_dividend_data(code=bscode, year=str(year), yearType="operate")
             if rs.error_code != "0":
                 continue
@@ -390,7 +413,7 @@ def _query_kind(bs, bscode: str, kind: str) -> tuple[list, list]:
 
     if kind == "adjust_factor":
         # 复权因子
-        rs = bs.query_adjust_factor(bscode, f"{min(_year_range())}-01-01", _today())
+        rs = bs.query_adjust_factor(bscode, f"{min(_year_range(asof_year))}-01-01", asof_date)
         fields, rows = _collect_rs(rs)
         return fields, rows[-_RS_LIMIT:]
 
@@ -402,13 +425,13 @@ def _query_kind(bs, bscode: str, kind: str) -> tuple[list, list]:
 
     if kind == "qfq":
         # 本地计算前复权：不复权收盘价 × 前复权因子 = 前复权价
-        start = f"{min(_year_range())}-01-01"
+        start = f"{min(_year_range(asof_year))}-01-01"
         rs_k = bs.query_history_k_data_plus(
-            bscode, "date,close", start_date=start, end_date=_today(),
+            bscode, "date,close", start_date=start, end_date=asof_date,
             frequency="d", adjustflag="3",
         )
         _, krows = _collect_rs(rs_k)
-        rs_f = bs.query_adjust_factor(bscode, start, _today())
+        rs_f = bs.query_adjust_factor(bscode, start, asof_date)
         ff_fields, frows = _collect_rs(rs_f)
         # 用字段名定位前复权因子列，避免顺序依赖
         pos_f = ff_fields.index("foreAdjustFactor")
@@ -429,22 +452,65 @@ def _query_kind(bs, bscode: str, kind: str) -> tuple[list, list]:
     raise ValueError(f"未知数据种类: {kind}")
 
 
-def query_stock_data(code: str, kind: str) -> dict:
-    """查询个股 baostock 数据，返回 {"fields": [...], "rows": [[...], ...]}。"""
-    if kind not in STOCK_KINDS_MAP:
-        raise ValueError(f"未知数据种类: {kind}")
+def _get_stock_cache() -> cache_mod.StockCache:
+    """惰性创建个股数据缓存（独立缓存库，不影响主行情库）。"""
+    global _STOCK_CACHE
+    if _STOCK_CACHE is None:
+        path = str((BASE_DIR.parent / "data" / "stock_cache.db").resolve())
+        _STOCK_CACHE = cache_mod.StockCache(path, ttl=_CACHE_TTL)
+    return _STOCK_CACHE
+
+
+def _ensure_bs_login():
+    """确保 baostock 已登录。复用单一全局会话，成功或首次 login 后不再每次 logout。"""
+    global _BS_LOGGED_IN
     import baostock as bs
-    bscode = _bs_code(code)
+    if _BS_LOGGED_IN:
+        return bs
     lg = bs.login()
     if lg.error_code != "0":
+        _BS_LOGGED_IN = False
         raise ConnectionError(f"baostock 登录失败: {lg.error_msg}")
-    try:
-        fields, rows = _query_kind(bs, bscode, kind)
-        if not fields:
-            raise RuntimeError("该数据种类无返回数据（可能该股无此类信息）")
-        return {"fields": fields, "rows": rows}
-    finally:
-        bs.logout()
+    _BS_LOGGED_IN = True
+    return bs
+
+
+def _bs_query(bscode: str, kind: str, as_of: str | None = None) -> tuple[list, list]:
+    """在全局锁内查询 baostock（只保证一次登录并复用）。查询因会话失效异常时自动重登重试一次。"""
+    global _BS_LOGGED_IN
+    with _BS_LOCK:
+        bs = _ensure_bs_login()
+        try:
+            return _query_kind(bs, bscode, kind, as_of)
+        except Exception:
+            # 可能是长连接会话/网络失效：清除登录态，重登一次后重试
+            _BS_LOGGED_IN = False
+            bs = _ensure_bs_login()
+            return _query_kind(bs, bscode, kind, as_of)
+
+
+def query_stock_data(code: str, kind: str, as_of: str | None = None) -> dict:
+    """查询个股 baostock 数据并本地缓存，返回 {"fields": [...], "rows": [[...], ...]}。
+
+    as_of 为数据截止日期（可选）：传入后可查看/缓存该历史时点的数据；
+    为 None 时取到今天。缓存键含 as_of，不同时点数据互不覆盖。
+
+    查询顺序：内存缓存 → SQLite 缓存 → 真实 baostock 请求（回填两层缓存）。
+    """
+    if kind not in STOCK_KINDS_MAP:
+        raise ValueError(f"未知数据种类: {kind}")
+    bscode = _bs_code(code)
+    cache = _get_stock_cache()
+    as_of_key = (as_of or "").strip() or "latest"
+    cached = cache.get(bscode, kind, as_of_key)
+    if cached is not None:
+        return cached
+    fields, rows = _bs_query(bscode, kind, as_of)
+    if not fields:
+        raise RuntimeError("该数据种类无返回数据（可能该股无此类信息）")
+    result = {"fields": fields, "rows": rows}
+    cache.set(bscode, kind, as_of_key, result)
+    return result
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -460,8 +526,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", f"{ctype}; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
-        self.wfile.write(body)
+        # 客户端可能在长请求处理期间主动断开（刷新/停止/超时）。
+        # 此时端头刷屏和正文写入会抛连接类异常；属于正常弃连，静默处理，避免 traceback 刷屏，
+        # 也不再让 socketserver 打印 handler 崩溃。
+        try:
+            self.end_headers()
+            self.wfile.write(body)
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
+            self.close_connection = True
 
     def _read_json(self) -> dict:
         length = int(self.headers.get("Content-Length", 0) or 0)
@@ -721,9 +793,11 @@ class Handler(BaseHTTPRequestHandler):
             if not code or not kind:
                 self._send(400, {"error": "需要 code 和 kind"})
                 return
+            as_of = (data.get("as_of") or "").strip() or None
             try:
-                self._send(200, {"ok": True, **query_stock_data(code, kind)})
+                self._send(200, {"ok": True, "as_of": as_of or "latest", **query_stock_data(code, kind, as_of)})
             except Exception as exc:  # noqa: BLE001
+                logger.error("个股数据查询失败 code=%s kind=%s: %s", code, kind, exc)
                 self._send(500, {"ok": False, "error": str(exc)})
 
         elif path == "/api/cancel":

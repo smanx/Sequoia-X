@@ -405,6 +405,7 @@ function renderTabs(keys,results,names,futures){
     else{
       const batchBtn=(r.symbols&&r.symbols.length)
         ?`<div class="batch-row"><button class="btn-primary" data-batch="${k}">获取本列表全部数据</button>`+
+         `<button class="btn-primary btn-reopen" data-reopen="${k}" disabled>打开上次获取数据</button>`+
          `<span class="batch-hint">串行获取本列表 ${r.symbols.length} 只股票的完整数据</span></div>`
         :'';
       body = batchBtn + statsBlock(r.stats, names) + resultTable(r, names, futures);
@@ -419,6 +420,8 @@ function renderTabs(keys,results,names,futures){
   });
   // 批量获取按钮
   document.querySelectorAll('[data-batch]').forEach(b=>b.addEventListener('click',()=>openBatch(b.dataset.batch)));
+  // 打开上次获取数据按钮
+  document.querySelectorAll('.btn-reopen').forEach(b=>b.addEventListener('click',()=>openBatch(b.dataset.reopen,true)));
   // 默认选中：优先保留上次选中的 tab（若仍在本次结果中），否则第一个
   selectTab(activeTab && keys.includes(activeTab) ? activeTab : keys[0]);
 }
@@ -493,7 +496,7 @@ function resultTable(r,names,futures){
     const nm=names[s]||'';
     const fut=futures&&futures[s]||{};
     const cells=FUTURE_NODES.map(node=>`<td style="${cellStyle(fut[node])}">${fmtPct(fut[node])}</td>`).join('');
-    return `<tr><td class="code"><a target="_blank" href="/stock.html?code=${s}&name=${encodeURIComponent(nm)}" class="stock-link">${s}</a></td><td class="name">${nm||'—'}</td>${cells}</tr>`;
+    return `<tr><td class="code"><a target="_blank" href="/stock.html?code=${s}&name=${encodeURIComponent(nm)}&as_of=${encodeURIComponent(lastAsOf)}" class="stock-link">${s}</a></td><td class="name">${nm||'—'}</td>${cells}</tr>`;
   }).join('');
   const heads=FUTURE_NODES.map(node=>`<th>${node}</th>`).join('');
   return `<div class="scroll future-scroll"><table><thead><tr><th style="width:92px">代码</th><th>股票名称</th>${heads}</tr></thead><tbody>${rows}${totalRow}</tbody></table></div>`+
@@ -529,7 +532,7 @@ function rangeTable(r,names,futures){
       const nm=names[s]||'';
       const fut=(futures&&futures[s]&&futures[s][date])||{};
       const cells=FUTURE_NODES.map(node=>`<td style="${cellStyle(fut[node])}">${fmtPct(fut[node])}</td>`).join('');
-      allRows.push(`<tr><td class="code"><a target="_blank" href="/stock.html?code=${s}&name=${encodeURIComponent(nm)}" class="stock-link">${s}</a></td><td class="name">${nm||'—'}</td>${cells}</tr>`);
+      allRows.push(`<tr><td class="code"><a target="_blank" href="/stock.html?code=${s}&name=${encodeURIComponent(nm)}&as_of=${encodeURIComponent(date)}" class="stock-link">${s}</a></td><td class="name">${nm||'—'}</td>${cells}</tr>`);
     }
   }
   allRows.push(`<tr class="total-row"><td class="code total-label">合计</td><td class="name"></td>${totalCells}</tr>`);
@@ -577,11 +580,20 @@ function dayHasData(r){
 }
 
 // ── 列表页批量获取：一键拉取当前结果列表全部股票的完整数据（串行，实时日志）──
-let lastResults=null, lastNames={}, batchData={};
+let lastResults=null, lastNames={}, batchData={}, batchRunning=false, lastAsOf='';
 function batchLog(log,html,cls){ const d=document.createElement('div'); d.className=cls||''; d.innerHTML=html; log.appendChild(d); }
-async function openBatch(key){
+async function openBatch(key, reopen=false){
+  // 重新打开弹框：展示当前日志（含正在获取的实时进度）与完成区，不重新获取
+  if(reopen){
+    $('batchCard').style.display='flex';
+    // 正在获取中则不显示"完成区"，只看实时日志；否则按是否有数据决定
+    $('batchDone').style.display= batchRunning ? 'none' : (hasBatchData()?'flex':'none');
+    refreshReopen(); return;
+  }
   const rec=lastResults&&lastResults[key];
   if(!rec || !rec.symbols || !rec.symbols.length){ setStatus('<span class="warn">当前列表无可获取的股票</span>'); return; }
+  // 已有任务在跑：不再重复起一套，仅重新打开弹框看进度
+  if(batchRunning){ $('batchCard').style.display='flex'; refreshReopen(); return; }
   const codes=rec.symbols;
   const card=$('batchCard'); card.style.display='flex';
   $('batchDone').style.display='none';
@@ -589,37 +601,58 @@ async function openBatch(key){
   $('batchStatus').innerHTML='';
   $('batchTitle').textContent=`批量获取：${codes.length} 只股票 × ${BATCH_KINDS.length} 项数据（串行）`;
   batchData={};
+  batchRunning=true;
+  refreshReopen();  // 正在获取中即可重新打开
   const total=codes.length*BATCH_KINDS.length;
   let done=0, okCount=0, failCount=0;
   batchLog(log,`开始获取 ${codes.length} 只股票…`);
-  for(let si=0; si<codes.length; si++){
-    const code=codes[si], nm=(lastNames&&lastNames[code])||'';
-    batchData[code]={};
-    for(const kd of BATCH_KINDS){
-      done++;
-      const line=document.createElement('div');
-      line.innerHTML=`<span class="warn">[${si+1}/${codes.length}]</span> ${code} ${nm} → ${kd.title} …`;
-      line.dataset.k=code+'|'+kd.key;
-      log.appendChild(line); log.scrollTop=log.scrollHeight;
-      try{
-        const r=await jpost('/api/stock/data',{code,kind:kd.key});
-        if(r && r.ok!==false && r.fields){
-          batchData[code][kd.key]={fields:r.fields,rows:r.rows};
-          okCount++; line.innerHTML=`<span class="ok">[${si+1}/${codes.length}]</span> ${code} ${nm} → ${kd.title} <span class="ok">成功</span>`;
-        }else{
+  try{
+    for(let si=0; si<codes.length; si++){
+      const code=codes[si], nm=(lastNames&&lastNames[code])||'';
+      batchData[code]={};
+      for(const kd of BATCH_KINDS){
+        done++;
+        const line=document.createElement('div');
+        line.innerHTML=`<span class="warn">[${si+1}/${codes.length}]</span> ${code} ${nm} → ${kd.title} …`;
+        line.dataset.k=code+'|'+kd.key;
+        log.appendChild(line); log.scrollTop=log.scrollHeight;
+        try{
+          const r=await jpost('/api/stock/data',{code,kind:kd.key, as_of:lastAsOf||''});
+          if(r && r.ok!==false && r.fields){
+            batchData[code][kd.key]={fields:r.fields,rows:r.rows};
+            okCount++; line.innerHTML=`<span class="ok">[${si+1}/${codes.length}]</span> ${code} ${nm} → ${kd.title} <span class="ok">成功</span>`;
+          }else{
+            batchData[code][kd.key]=null; failCount++;
+            line.innerHTML=`<span class="warn">[${si+1}/${codes.length}]</span> ${code} ${nm} → ${kd.title} <span class="fail">失败：${(r&&r.error)||(r&&r.msg)||'无数据'}</span>`;
+          }
+        }catch(e){
           batchData[code][kd.key]=null; failCount++;
-          line.innerHTML=`<span class="warn">[${si+1}/${codes.length}]</span> ${code} ${nm} → ${kd.title} <span class="fail">失败：${(r&&r.error)||(r&&r.msg)||'无数据'}</span>`;
+          line.innerHTML=`<span class="warn">[${si+1}/${codes.length}]</span> ${code} ${nm} → ${kd.title} <span class="fail">异常：${e.message}</span>`;
         }
-      }catch(e){
-        batchData[code][kd.key]=null; failCount++;
-        line.innerHTML=`<span class="warn">[${si+1}/${codes.length}]</span> ${code} ${nm} → ${kd.title} <span class="fail">异常：${e.message}</span>`;
+        log.scrollTop=log.scrollHeight;
       }
-      log.scrollTop=log.scrollHeight;
     }
+  } finally {
+    batchRunning=false;
+    refreshReopen();
   }
   batchLog(log,`<b>完成：共 ${total} 项，成功 ${okCount}，失败 ${failCount}</b>`);
   window._batchData=batchData;
   $('batchDone').style.display='flex';
+}
+// 是否已有可用的批量获取数据
+function hasBatchData(){
+  for(const c in batchData){
+    for(const kd of BATCH_KINDS){
+      if(batchData[c] && batchData[c][kd.key]) return true;
+    }
+  }
+  return false;
+}
+// 刷新所有"打开上次获取数据"按钮的可用状态：正在获取 或 已有数据时均可用
+function refreshReopen(){
+  const ok = batchRunning || hasBatchData();
+  document.querySelectorAll('.btn-reopen').forEach(b=>{ b.disabled=!ok; });
 }
 function batchToText(){
   const codes=Object.keys(batchData); const out=[];
@@ -775,6 +808,7 @@ async function runAnalyze(){
     }
     const sec=((Date.now()-t0)/1000).toFixed(1);
     setStatus(`<span class="ok">完成，用时 ${sec}s · ${d}</span>`);
+    lastAsOf=d;
     renderTabs(keys, r.results, r.names||{}, r.futures||{});
     return r;
   }catch(e){ setStatus(`<span class="err">请求失败：${e.message}</span>`); return null; }
@@ -810,6 +844,7 @@ async function shiftDay(dir){
       if(skipped>0) setStatus(`<span class="warn">跳过 ${skipped} 个无数据日 → </span>`);
       const sec=((Date.now()-t0)/1000).toFixed(1);
       setStatus(`<span class="ok">完成，用时 ${sec}s · ${d}</span>`);
+      lastAsOf=d;
       renderTabs(keys, r.results, r.names||{}, r.futures||{});
       release(); return;
     }
@@ -840,6 +875,7 @@ async function runRange(){
     }
     const sec=((Date.now()-t0)/1000).toFixed(1);
     setStatus(`<span class="ok">完成，用时 ${sec}s · ${r.trade_days.length} 个交易日（${r.start} ~ ${r.end}）</span>`);
+    lastAsOf=r.end;
     renderRangeTabs(keys, r.results, r.names||{}, r.futures||{}, r.trade_days||[], r.start, r.end);
     return r;
   }catch(e){ setStatus(`<span class="err">请求失败：${e.message}</span>`); return null; }
