@@ -293,6 +293,152 @@ def _merge_day(results: dict, hit_days_by_code: dict, day: str, day_results: dic
             hit_days_by_code.setdefault(s, set()).add(day)
 
 
+def _bs_code(code: str) -> str:
+    """纯数字代码或带 sh./sz. 前缀 -> 标准 baostock 代码（如 sh.600000）。"""
+    code = code.strip()
+    if code.startswith(("sh.", "sz.")):
+        return code
+    return engine_mod.DataEngine._to_baostock_code(code)
+
+
+# 个股详情页支持的数据种类（key -> 中文标题）
+STOCK_KINDS: list[dict] = [
+    {"key": "dividend", "title": "除权除息信息"},
+    {"key": "adjust_factor", "title": "复权因子信息"},
+    {"key": "qfq", "title": "本地计算前复权"},
+    {"key": "profit", "title": "季频盈利能力"},
+    {"key": "operation", "title": "季频营运能力"},
+    {"key": "growth", "title": "季频成长能力"},
+    {"key": "balance", "title": "季频偿债能力"},
+    {"key": "cashflow", "title": "季频现金流量"},
+    {"key": "dupont", "title": "季频杜邦指数"},
+    {"key": "express", "title": "季频业绩快报"},
+    {"key": "forecast", "title": "季频业绩预告"},
+    {"key": "basic", "title": "证券基本资料"},
+]
+STOCK_KINDS_MAP = {k["key"]: k["title"] for k in STOCK_KINDS}
+
+# 季频/区间查询回溯的历史年数、单次返回的最大行数
+_QY_MAX = 12
+_RS_LIMIT = 250
+
+
+def _collect_rs(rs):
+    """把 baostock 结果集收成 (fields, rows)。字段用返回结果动态命名，不硬编码。"""
+    fields = list(rs.fields)
+    rows = []
+    while rs.error_code == "0" and rs.next():
+        rows.append(rs.get_row_data())
+    return fields, rows
+
+
+def _today() -> str:
+    return time.strftime("%Y-%m-%d")
+
+
+def _year_range() -> range:
+    """回溯 _QY_MAX 年到当前年。"""
+    y0 = int(time.strftime("%Y"))
+    return range(y0 - _QY_MAX + 1, y0 + 1)
+
+
+def _query_kind(bs, bscode: str, kind: str) -> tuple[list, list]:
+    """执行某一种类的查询，返回 (fields, rows)。kind 必须是 STOCK_KINDS_MAP 的 key。"""
+    if kind in ("profit", "operation", "growth", "balance", "cashflow",
+                "dupont", "express", "forecast"):
+        # 季频类：按 (年, 季度) 循环，跨年合并
+        fn = {
+            "profit": bs.query_profit_data,
+            "operation": bs.query_operation_data,
+            "growth": bs.query_growth_data,
+            "balance": bs.query_balance_data,
+            "cashflow": bs.query_cash_flow_data,
+            "dupont": bs.query_dupont_data,
+            "express": bs.query_performance_express_report,
+            "forecast": bs.query_forecast_report,
+        }[kind]
+        all_fields, all_rows = None, []
+        for year in _year_range():
+            for quarter in range(1, 5):
+                rs = fn(code=bscode, year=str(year), quarter=str(quarter))
+                if rs.error_code != "0":
+                    continue  # 该期无披露则跳过，不当作报错
+                fields, rows = _collect_rs(rs)
+                all_fields = fields or all_fields
+                all_rows.extend(rows)
+        return all_fields or [], all_rows
+
+    if kind == "dividend":
+        # 除权除息：按"实际除权除息年份"逐年查询
+        all_fields, all_rows = None, []
+        for year in _year_range():
+            rs = bs.query_dividend_data(code=bscode, year=str(year), yearType="operate")
+            if rs.error_code != "0":
+                continue
+            fields, rows = _collect_rs(rs)
+            all_fields = fields or all_fields
+            all_rows.extend(rows)
+        return all_fields or [], all_rows
+
+    if kind == "adjust_factor":
+        # 复权因子
+        rs = bs.query_adjust_factor(bscode, f"{min(_year_range())}-01-01", _today())
+        fields, rows = _collect_rs(rs)
+        return fields, rows[-_RS_LIMIT:]
+
+    if kind == "basic":
+        # 证券基本资料
+        rs = bs.query_stock_basic(code_name="", code=bscode)
+        fields, rows = _collect_rs(rs)
+        return fields, rows
+
+    if kind == "qfq":
+        # 本地计算前复权：不复权收盘价 × 前复权因子 = 前复权价
+        start = f"{min(_year_range())}-01-01"
+        rs_k = bs.query_history_k_data_plus(
+            bscode, "date,close", start_date=start, end_date=_today(),
+            frequency="d", adjustflag="3",
+        )
+        _, krows = _collect_rs(rs_k)
+        rs_f = bs.query_adjust_factor(bscode, start, _today())
+        ff_fields, frows = _collect_rs(rs_f)
+        # 用字段名定位前复权因子列，避免顺序依赖
+        pos_f = ff_fields.index("foreAdjustFactor")
+        fact = {r[0]: float(r[pos_f]) for r in frows if r[pos_f] not in ("", None)}
+        out = []
+        for r in krows[-_RS_LIMIT:]:
+            close = r[1]
+            fac = fact.get(r[0])
+            qfq = ""
+            try:
+                if fac is not None and close not in ("", None):
+                    qfq = round(float(close) * fac, 4)
+            except Exception:  # noqa: BLE001
+                qfq = ""
+            out.append([r[0], close, "" if fac is None else fac, qfq])
+        return ["date", "close", "foreAdjustFactor", "qfqClose"], out
+
+    raise ValueError(f"未知数据种类: {kind}")
+
+
+def query_stock_data(code: str, kind: str) -> dict:
+    """查询个股 baostock 数据，返回 {"fields": [...], "rows": [[...], ...]}。"""
+    if kind not in STOCK_KINDS_MAP:
+        raise ValueError(f"未知数据种类: {kind}")
+    import baostock as bs
+    bscode = _bs_code(code)
+    lg = bs.login()
+    if lg.error_code != "0":
+        raise ConnectionError(f"baostock 登录失败: {lg.error_msg}")
+    try:
+        fields, rows = _query_kind(bs, bscode, kind)
+        if not fields:
+            raise RuntimeError("该数据种类无返回数据（可能该股无此类信息）")
+        return {"fields": fields, "rows": rows}
+    finally:
+        bs.logout()
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "SequoiaXWeb/1.0"
 
@@ -354,6 +500,8 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path in ("/", "/index.html"):
             self._serve_static("index.html", "text/html")
+        elif path == "/stock.html":
+            self._serve_static("stock.html", "text/html")
         elif path == "/api/info":
             try:
                 self._send(200, get_engine().get_db_info())
@@ -555,6 +703,18 @@ class Handler(BaseHTTPRequestHandler):
                 })
             except AnalysisCanceled as exc:
                 self._send(200, {"ok": False, "canceled": True, "error": str(exc)})
+            except Exception as exc:  # noqa: BLE001
+                self._send(500, {"ok": False, "error": str(exc)})
+
+        elif path == "/api/stock/data":
+            # 个股 baostock 数据查询：{code, kind} -> {fields, rows}
+            code = (data.get("code") or "").strip()
+            kind = (data.get("kind") or "").strip()
+            if not code or not kind:
+                self._send(400, {"error": "需要 code 和 kind"})
+                return
+            try:
+                self._send(200, {"ok": True, **query_stock_data(code, kind)})
             except Exception as exc:  # noqa: BLE001
                 self._send(500, {"ok": False, "error": str(exc)})
 

@@ -68,6 +68,8 @@
 
   #status,#updateStatus{padding:6px 0;font-size:13px;min-height:20px}
   .err{color:var(--bad)}
+  .stock-link{color:var(--accent2);text-decoration:none;cursor:pointer}
+  .stock-link:hover{text-decoration:underline;color:var(--accent)}
   .ok{color:var(--good)}
   .warn{color:var(--warn)}
   .btn-danger{background:#dc2626;color:#fff;border:1px solid #b91c1c;border-radius:9px;
@@ -230,6 +232,8 @@
         <div class="dp" data-for="analyzeDate"><span class="dp-text">选择日期</span><span class="dp-caret">▾</span></div>
         <input type="hidden" id="analyzeDate"></div>
       <button class="btn-primary" id="btnAnalyze">开始分析</button>
+      <button class="btn-primary" id="btnPrevDay">← 上一个工作日</button>
+      <button class="btn-primary" id="btnNextDay">下一个工作日 →</button>
       <div class="field" style="margin-left:auto">
         <label>线程模式</label>
         <select id="modeSel" class="sel">
@@ -246,6 +250,8 @@
         <div class="dp" data-for="rangeAnaEnd"><span class="dp-text">选择日期</span><span class="dp-caret">▾</span></div>
         <input type="hidden" id="rangeAnaEnd"></div>
       <button class="btn-primary" id="btnRange">运行范围分析</button>
+      <button class="btn-primary" id="btnPrevRange">← 上一区间</button>
+      <button class="btn-primary" id="btnNextRange">下一区间 →</button>
     </div>
     <div class="checks" id="strategyChecks"></div>
     <div class="hint">选择任意交易日，策略会在该日(含之前)的历史上判定"当天符合条件"的股票；或选择时间范围逐日运行（休市日自动跳过），结果列表带日期。每个策略对应一个标签页。</div>
@@ -279,6 +285,7 @@
 
 <script>
 const $ = id => document.getElementById(id);
+let dbMin=null, dbMax=null;   // 数据库数据区间（用于切换时的边界判断）
 const STRAT_FALLBACK = {
   MaVolumeStrategy:{name:'MaVolume 均线放量'},
   TurtleTradeStrategy:{name:'TurtleTrade 海龟突破'},
@@ -299,6 +306,7 @@ function setUpdate(msg,cls){ $('updateStatus').innerHTML=msg; $('updateStatus').
 async function refreshInfo(){
   try{
     const info=await jget('/api/info');
+    dbMin=info.min_date||null; dbMax=info.max_date||null;
     $('dbinfo').innerHTML=
       `<div class="stat-item"><b>${info.symbol_count}</b><small>覆盖股票</small></div>`+
       `<div class="stat-item"><b>${info.row_count.toLocaleString()}</b><small>K线记录</small></div>`+
@@ -357,8 +365,8 @@ function renderTabs(keys,results,names,futures){
   document.querySelectorAll('.tab').forEach(t=>{
     t.onclick=()=>selectTab(t.dataset.key);
   });
-  // 默认选中第一个
-  selectTab(keys[0]);
+  // 默认选中：优先保留上次选中的 tab（若仍在本次结果中），否则第一个
+  selectTab(activeTab && keys.includes(activeTab) ? activeTab : keys[0]);
 }
 
 // 统计块：分析了多少 / 符合·不符合 / 不符原因分类
@@ -431,7 +439,7 @@ function resultTable(r,names,futures){
     const nm=names[s]||'';
     const fut=futures&&futures[s]||{};
     const cells=FUTURE_NODES.map(node=>`<td style="${cellStyle(fut[node])}">${fmtPct(fut[node])}</td>`).join('');
-    return `<tr><td class="code">${s}</td><td class="name">${nm||'—'}</td>${cells}</tr>`;
+    return `<tr><td class="code"><a target="_blank" href="/stock.html?code=${s}&name=${encodeURIComponent(nm)}" class="stock-link">${s}</a></td><td class="name">${nm||'—'}</td>${cells}</tr>`;
   }).join('');
   const heads=FUTURE_NODES.map(node=>`<th>${node}</th>`).join('');
   return `<div class="scroll future-scroll"><table><thead><tr><th style="width:92px">代码</th><th>股票名称</th>${heads}</tr></thead><tbody>${rows}${totalRow}</tbody></table></div>`+
@@ -467,7 +475,7 @@ function rangeTable(r,names,futures){
       const nm=names[s]||'';
       const fut=(futures&&futures[s]&&futures[s][date])||{};
       const cells=FUTURE_NODES.map(node=>`<td style="${cellStyle(fut[node])}">${fmtPct(fut[node])}</td>`).join('');
-      allRows.push(`<tr><td class="code">${s}</td><td class="name">${nm||'—'}</td>${cells}</tr>`);
+      allRows.push(`<tr><td class="code"><a target="_blank" href="/stock.html?code=${s}&name=${encodeURIComponent(nm)}" class="stock-link">${s}</a></td><td class="name">${nm||'—'}</td>${cells}</tr>`);
     }
   }
   allRows.push(`<tr class="total-row"><td class="code total-label">合计</td><td class="name"></td>${totalCells}</tr>`);
@@ -498,7 +506,20 @@ function renderRangeTabs(keys,results,names,futures,tradeDays,start,end){
     $('panels').appendChild(p);
   }
   document.querySelectorAll('.tab').forEach(t=>{ t.onclick=()=>selectTab(t.dataset.key); });
-  selectTab(keys[0]);
+  selectTab(activeTab && keys.includes(activeTab) ? activeTab : keys[0]);
+}
+
+// ── 日期切换辅助 ──
+function addDays(dateStr, delta){
+  const d=new Date(dateStr+'T00:00:00');
+  d.setDate(d.getDate()+delta);
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+}
+// 判断单日分析响应是否"当日有数据"（任一策略分析条数>0）
+function dayHasData(r){
+  if(!r || r.ok===false) return false;
+  const res=r.results||{};
+  return Object.values(res).some(x=>x && x.stats && (x.stats.total||0)>0);
 }
 
 // ── 日期弹框选择器（点击 .dp 弹出月历，快速选年月日）──
@@ -596,11 +617,14 @@ $('btnUpdateStop').onclick=async ()=>{
   $('btnUpdateStop').disabled=false;
 };
 
-$('btnAnalyze').onclick=async ()=>{
+$('btnAnalyze').onclick=async ()=>runAnalyze();
+
+// 单日分析：返回响应对象（供上下一天切换复用）
+async function runAnalyze(){
   const d=$('analyzeDate').value;
-  if(!d){ setStatus('<span class="err">请先选择日期</span>'); return; }
+  if(!d){ setStatus('<span class="err">请先选择日期</span>'); return null; }
   const keys=[...document.querySelectorAll('#strategyChecks input:checked')].map(c=>c.dataset.key);
-  if(!keys.length){ setStatus('<span class="err">请至少勾选一个策略</span>'); return; }
+  if(!keys.length){ setStatus('<span class="err">请至少勾选一个策略</span>'); return null; }
   $('btnAnalyze').disabled=true;
   $('stopWrap').style.display='';
   setStatus(`<span class="spin"></span>正在分析 ${d} ...`);
@@ -609,20 +633,63 @@ $('btnAnalyze').onclick=async ()=>{
     const r=await jpost('/api/analyze',{date:d, mode:$('modeSel').value});
     if(!r.ok){
       setStatus(r.canceled?`<span class="warn">分析已取消</span>`:`<span class="err">分析失败：${r.error||'未知'}</span>`);
-      return;
+      return r;
     }
     const sec=((Date.now()-t0)/1000).toFixed(1);
     setStatus(`<span class="ok">完成，用时 ${sec}s · ${d}</span>`);
     renderTabs(keys, r.results, r.names||{}, r.futures||{});
-  }catch(e){ setStatus(`<span class="err">请求失败：${e.message}</span>`); }
-  finally{ $('btnAnalyze').disabled=false; $('stopWrap').style.display='none'; }  // 无论结果都恢复
-};
+    return r;
+  }catch(e){ setStatus(`<span class="err">请求失败：${e.message}</span>`); return null; }
+  finally{ $('btnAnalyze').disabled=false; $('stopWrap').style.display='none'; }
+}
 
-$('btnRange').onclick=async ()=>{
-  const start=$('rangeAnaStart').value,end=$('rangeAnaEnd').value;
-  if(!start||!end){ setStatus('<span class="err">请先选择范围起止日期</span>'); return; }
+// 上一个工作日 / 下一个工作日：逐日推进，当日无数据（休市日）则自动继续；
+// 若连续 7 天仍无数据，则停止并报错。
+async function shiftDay(dir){
+  let d=$('analyzeDate').value || dbMax;
+  if(!d){ setStatus('<span class="err">请先选择日期</span>'); return; }
   const keys=[...document.querySelectorAll('#strategyChecks input:checked')].map(c=>c.dataset.key);
   if(!keys.length){ setStatus('<span class="err">请至少勾选一个策略</span>'); return; }
+  $('btnAnalyze').disabled=true;$('btnPrevDay').disabled=true;$('btnNextDay').disabled=true;
+  let skipped=0;
+  const release=()=>{$('btnAnalyze').disabled=false;$('btnPrevDay').disabled=false;$('btnNextDay').disabled=false;};
+  for(let i=0;i<7;i++){
+    d=addDays(d,dir);
+    if(dbMax && dir>0 && d>dbMax){ release(); setStatus('<span class="warn">已是最后一个有数据的日期</span>'); return; }
+    if(dbMin && dir<0 && d<dbMin){ release(); setStatus('<span class="warn">已是最早一个有数据的日期</span>'); return; }
+    setDate('analyzeDate',d);
+    setStatus(`<span class="spin"></span>正在分析 ${d} ...`);
+    const t0=Date.now();
+    let r;
+    try{ r=await jpost('/api/analyze',{date:d, mode:$('modeSel').value}); }
+    catch(e){ release(); setStatus(`<span class="err">请求失败：${e.message}</span>`); return; }
+    // 无数据：闭市/非交易日（ok:false 且提示该类型）或 ok:true 但分析条数为 0，都应视为"该日无数据"，继续跳
+    const isNoData = !r.ok && /闭市|非交易日|无当日行情|无数据/i.test(r.error||'');
+    if(!r.ok && !isNoData){  // 真正的错误（取消 / 系统异常），停止
+      release(); setStatus(r.canceled?`<span class="warn">分析已取消</span>`:`<span class="err">分析失败：${r.error||'未知'}</span>`); return;
+    }
+    if(r.ok && dayHasData(r)){  // 跳到有数据的交易日，渲染并停
+      if(skipped>0) setStatus(`<span class="warn">跳过 ${skipped} 个无数据日 → </span>`);
+      const sec=((Date.now()-t0)/1000).toFixed(1);
+      setStatus(`<span class="ok">完成，用时 ${sec}s · ${d}</span>`);
+      renderTabs(keys, r.results, r.names||{}, r.futures||{});
+      release(); return;
+    }
+    skipped++;  // 该日无数据（休市），继续往下一个工作日
+  }
+  // 连续 7 天都无数据，停止并报错
+  release();
+  setStatus(`<span class="err">连续 7 天无数据，无需再跳转（已回到原选择日期）</span>`);
+}
+
+$('btnRange').onclick=async ()=>runRange();
+
+// 范围分析：返回响应对象（供区间切换复用）
+async function runRange(){
+  const start=$('rangeAnaStart').value,end=$('rangeAnaEnd').value;
+  if(!start||!end){ setStatus('<span class="err">请先选择范围起止日期</span>'); return null; }
+  const keys=[...document.querySelectorAll('#strategyChecks input:checked')].map(c=>c.dataset.key);
+  if(!keys.length){ setStatus('<span class="err">请至少勾选一个策略</span>'); return null; }
   $('btnRange').disabled=true;
   $('stopWrap').style.display='';
   setStatus(`<span class="spin"></span>正在逐日分析 ${start} ~ ${end}（休市日自动跳过），请稍候...`);
@@ -631,15 +698,32 @@ $('btnRange').onclick=async ()=>{
     const r=await jpost('/api/analyze_range',{start,end,strategies:keys, mode:$('modeSel').value});
     if(!r.ok){
       setStatus(r.canceled?`<span class="warn">范围分析已取消</span>`:`<span class="err">范围分析失败：${r.error||'未知'}</span>`);
-      return;
+      return r;
     }
     const sec=((Date.now()-t0)/1000).toFixed(1);
     setStatus(`<span class="ok">完成，用时 ${sec}s · ${r.trade_days.length} 个交易日（${r.start} ~ ${r.end}）</span>`);
     renderRangeTabs(keys, r.results, r.names||{}, r.futures||{}, r.trade_days||[], r.start, r.end);
-  }catch(e){ setStatus(`<span class="err">请求失败：${e.message}</span>`); }
+    return r;
+  }catch(e){ setStatus(`<span class="err">请求失败：${e.message}</span>`); return null; }
   finally{ $('btnRange').disabled=false; $('stopWrap').style.display='none'; }
-};
+}
 
+// 上一区间 / 下一区间：按当前区间的跨度整体向前/向后平移一个区间
+async function moveRange(dir){
+  const start=$('rangeAnaStart').value,end=$('rangeAnaEnd').value;
+  if(!start||!end){ setStatus('<span class="err">请先选择范围起止日期</span>'); return; }
+  const span=Math.max(1, Math.round((new Date(end+'T00:00:00')-new Date(start+'T00:00:00'))/864e5));
+  const ns=addDays(start, span*dir), ne=addDays(end, span*dir);
+  if(dir>0 && dbMax && ne>dbMax){ setStatus('<span class="warn">已是最近一个区间</span>'); return; }
+  if(dir<0 && dbMin && ns<dbMin){ setStatus('<span class="warn">已是最早一个区间</span>'); return; }
+  setDate('rangeAnaStart',ns); setDate('rangeAnaEnd',ne);
+  await runRange();
+}
+
+$('btnPrevDay').onclick=()=>shiftDay(-1);
+$('btnNextDay').onclick=()=>shiftDay(1);
+$('btnPrevRange').onclick=()=>moveRange(-1);
+$('btnNextRange').onclick=()=>moveRange(1);
 $('btnStop').onclick=async ()=>{
   setStatus('<span class="warn">正在请求停止，后台将在最近的检查点停下...</span>');
   try{ await jpost('/api/cancel',{}); }catch(e){}

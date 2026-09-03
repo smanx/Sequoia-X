@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>个股数据 | Sequoia-X</title>
+<style>
+  :root{
+    --bg:#0d1117; --card:#161b22; --card2:#1c242e; --border:#2b3440;
+    --text:#e6edf3; --muted:#8b96a3; --accent:#3b82f6; --accent2:#60a5fa;
+    --good:#34d399; --bad:#f87171; --warn:#fbbf24;
+    --radius:14px;
+  }
+  *{box-sizing:border-box}
+  ::-webkit-scrollbar{width:9px;height:9px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:#2f3a47;border-radius:999px}
+  ::-webkit-scrollbar-thumb:hover{background:#3b82f6}
+  *{scrollbar-width:thin;scrollbar-color:#2f3a47 transparent}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    background-image:radial-gradient(1200px 600px at 80% -10%,rgba(59,130,246,.12),transparent)}
+  .wrap{max-width:1100px;margin:0 auto;padding:24px 18px 70px}
+  .top{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin-bottom:18px}
+  .top h1{font-size:22px;margin:0}
+  .top .code{color:var(--accent2);font-weight:600}
+  a.back{color:var(--muted);text-decoration:none;font-size:13px}
+  a.back:hover{color:var(--accent2)}
+  .btn{background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:9px;
+    padding:9px 18px;cursor:pointer;font-weight:600;font-size:13px}
+  .btn:hover{border-color:var(--accent)}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  .btn-primary{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;border:none}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:14px;overflow:hidden}
+  .card-head{display:flex;align-items:center;gap:12px;padding:12px 16px;background:var(--card2);
+    border-bottom:1px solid var(--border)}
+  .card-head h2{font-size:14px;margin:0;flex:1}
+  .status{font-size:12px;color:var(--muted)}
+  .status.loading{color:var(--accent2)}
+  .status.ok{color:var(--good)}
+  .status.err{color:var(--bad)}
+  .card-body{padding:8px 0}
+  .card-body .none,.card-body .err{color:var(--muted);padding:14px 16px;font-size:13px}
+  .card-body .err{color:var(--bad)}
+  .tbl-wrap{overflow:auto;max-height:340px}
+  table{border-collapse:collapse;font-size:12px;width:100%}
+  th,td{white-space:nowrap;padding:5px 12px;border-bottom:1px solid var(--border);text-align:left;color:var(--text)}
+  th{position:sticky;top:0;background:var(--card2);z-index:1;color:var(--muted);font-weight:600}
+  tbody tr:hover{background:rgba(59,130,246,.07)}
+  .fetch-all-row{margin-bottom:16px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <a class="back" href="/">← 返回控制台</a>
+    <h1><span id="name">个股</span> <span class="code" id="code">&nbsp;</span></h1>
+    <span style="color:var(--muted);font-size:12px">数据来源：baostock</span>
+  </div>
+  <div class="fetch-all-row">
+    <button class="btn btn-primary" id="btnAll">获取全部数据</button>
+    <button class="btn" id="btnXq">雪球 K 线</button>
+    <button class="btn" id="btnCopy">一键复制所有数据</button>
+    <span class="status" id="allStatus"></span>
+  </div>
+  <div id="cards"></div>
+</div>
+
+<script>
+const KINDS=[
+  {key:"dividend",title:"除权除息信息"},
+  {key:"adjust_factor",title:"复权因子信息"},
+  {key:"qfq",title:"本地计算前复权"},
+  {key:"profit",title:"季频盈利能力"},
+  {key:"operation",title:"季频营运能力"},
+  {key:"growth",title:"季频成长能力"},
+  {key:"balance",title:"季频偿债能力"},
+  {key:"cashflow",title:"季频现金流量"},
+  {key:"dupont",title:"季频杜邦指数"},
+  {key:"express",title:"季频业绩快报"},
+  {key:"forecast",title:"季频业绩预告"},
+  {key:"basic",title:"证券基本资料"},
+];
+const $=id=>document.getElementById(id);
+const qs=new URLSearchParams(location.search);
+const CODE=qs.get('code')||'', NAME=qs.get('name')||'';
+const DATA={};  // 已获取的数据项缓存：{ key: {fields, rows} }
+
+// 每个卡片条目(数据源)的用途说明 —— 悬停在卡片标题上显示
+const HELP={
+  dividend:"上市公司分红送转明细：每股派息(税前/税后)、送股、转增股数及除权除息日、预案/实施公告日等。",
+  adjust_factor:"复权因子序列：前复权因子(foreAdjustFactor)与后复权因子(backAdjustFactor)，用于把历史价格折算成前/后复权价，消除除权除息造成的价格跳变。",
+  qfq:"本地计算前复权：取不复权收盘价 × 前复权因子，本地换算为前复权收盘价，使历史价格走势连续可比。",
+  profit:"季频盈利能力：按季度披露的盈利指标，如净资产收益率、销售净利率、毛利率、净利润、每股收益等。",
+  operation:"季频营运能力：按季度披露的营运效率，如应收账款/存货/流动资产/总资产周转率及周转天数。",
+  growth:"季频成长能力：按季度披露的增长指标，如净资产、总资产、净利润、基本每股收益同比增长率。",
+  balance:"季频偿债能力：按季度披露的偿债指标，如流动比率、速动比率、现金比率、资产负债率、产权比率。",
+  cashflow:"季频现金流量：按季度披露的现金流量相关比例指标，衡量经营/投资/筹资活动产生的现金流与资产、负债、利润的关系。",
+  dupont:"季频杜邦指数：用杜邦分析法把净资产收益率(ROE)拆解为盈利能力、营运效率与财务杠杆三大因素。",
+  express:"季频业绩快报：按季度披露的业绩快报，含净利润、总资产、总股本、净资产收益率、每股收益等关键经营数据。",
+  forecast:"季频业绩预告：按季度披露的业绩预告，含预告类型、净利润同比变动区间及业绩变动原因。",
+  basic:"证券基本资料：个股基础信息，如证券代码、证券简称、上市日期、退市日期、证券类型与上市状态。",
+};
+
+// 各数据源表格列名(baostock 字段)的中文释义 —— 悬停在列名上显示
+const FIELD_HELP={
+  qfq:{
+    date:"交易所行情日期 格式：YYYY-MM-DD",
+    close:"今收盘价 精度：小数点后4位；单位：人民币元",
+    foreAdjustFactor:"向前复权因子 除权除息日前一个交易日的收盘价/除权除息日最近的一个交易日的前收盘价",
+    qfqClose:"本地计算前复权收盘价 = 不复权收盘价 × 向前复权因子（本项目本地计算列）",
+  },
+  dividend:{
+    code:"证券代码",
+    dividPreNoticeDate:"预批露公告日",
+    dividAgmPumDate:"股东大会公告日期",
+    dividPlanAnnounceDate:"预案公告日",
+    dividPlanDate:"分红实施公告日",
+    dividRegistDate:"股权登记告日",
+    dividOperateDate:"除权除息日期",
+    dividPayDate:"派息日",
+    dividStockMarketDate:"红股上市交易日",
+    dividCashPsBeforeTax:"每股股利税前 派息比例分子(税前)/派息比例分母",
+    dividCashPsAfterTax:"每股股利税后 派息比例分子(税后)/派息比例分母",
+    dividStocksPs:"每股红股",
+    dividCashStock:"分红送转 每股派息数(税前)+每股送股数+每股转增股本数",
+    dividReserveToStockPs:"每股转增资本",
+  },
+  adjust_factor:{
+    code:"证券代码",
+    dividOperateDate:"除权除息日期",
+    foreAdjustFactor:"向前复权因子 除权除息日前一个交易日的收盘价/除权除息日最近的一个交易日的前收盘价",
+    backAdjustFactor:"向后复权因子 除权除息日最近的一个交易日的前收盘价/除权除息日前一个交易日的收盘价",
+    adjustFactor:"本次复权因子",
+  },
+  profit:{
+    code:"证券代码",
+    pubDate:"公司发布财报的日期",
+    statDate:"财报统计的季度的最后一天, 比如2017-03-31, 2017-06-30",
+    roeAvg:"净资产收益率(平均)(%) 归属母公司股东净利润/[(期初归属母公司股东的权益+期末归属母公司股东的权益)/2]\\*100%",
+    npMargin:"销售净利率(%) 净利润/营业收入\\*100%",
+    gpMargin:"销售毛利率(%) 毛利/营业收入\\*100%=(营业收入-营业成本)/营业收入\\*100%",
+    netProfit:"净利润(元)",
+    epsTTM:"每股收益 归属母公司股东的净利润TTM/最新总股本",
+    MBRevenue:"主营营业收入(元)",
+    totalShare:"总股本",
+    liqaShare:"流通股本",
+  },
+  operation:{
+    code:"证券代码",
+    pubDate:"公司发布财报的日期",
+    statDate:"财报统计的季度的最后一天, 比如2017-03-31, 2017-06-30",
+    NRTurnRatio:"应收账款周转率(次) 营业收入/[(期初应收票据及应收账款净额+期末应收票据及应收账款净额)/2]",
+    NRTurnDays:"应收账款周转天数(天) 季报天数/应收账款周转率(一季报：90天，中报：180天，三季报：270天，年报：360天)",
+    INVTurnRatio:"存货周转率(次) 营业成本/[(期初存货净额+期末存货净额)/2]",
+    INVTurnDays:"存货周转天数(天) 季报天数/存货周转率(一季报：90天，中报：180天，三季报：270天，年报：360天)",
+    CATurnRatio:"流动资产周转率(次) 营业总收入/[(期初流动资产+期末流动资产)/2]",
+    AssetTurnRatio:"总资产周转率 营业总收入/[(期初资产总额+期末资产总额)/2]",
+  },
+  growth:{
+    code:"证券代码",
+    pubDate:"公司发布财报的日期",
+    statDate:"财报统计的季度的最后一天, 比如2017-03-31, 2017-06-30",
+    YOYEquity:"净资产同比增长率 (本期净资产-上年同期净资产)/上年同期净资产的绝对值\\*100%",
+    YOYAsset:"总资产同比增长率 (本期总资产-上年同期总资产)/上年同期总资产的绝对值\\*100%",
+    YOYNI:"净利润同比增长率 (本期净利润-上年同期净利润)/上年同期净利润的绝对值\\*100%",
+    YOYEPSBasic:"基本每股收益同比增长率 (本期基本每股收益-上年同期基本每股收益)/上年同期基本每股收益的绝对值\\*100%",
+    YOYPNI:"归属母公司股东净利润同比增长率 (本期归属母公司股东净利润-上年同期归属母公司股东净利润)/上年同期归属母公司股东净利润的绝对值\\*100%",
+  },
+  balance:{
+    code:"证券代码",
+    pubDate:"公司发布财报的日期",
+    statDate:"财报统计的季度的最后一天, 比如2017-03-31, 2017-06-30",
+    currentRatio:"流动比率 流动资产/流动负债",
+    quickRatio:"速动比率 (流动资产-存货净额)/流动负债",
+    cashRatio:"现金比率 (货币资金+交易性金融资产)/流动负债",
+    YOYLiability:"总负债同比增长率 (本期总负债-上年同期总负债)/上年同期中负债的绝对值\\*100%",
+    liabilityToAsset:"资产负债率 负债总额/资产总额",
+    assetToEquity:"权益乘数 资产总额/股东权益总额=1/(1-资产负债率)",
+  },
+  cashflow:{
+    code:"证券代码",
+    pubDate:"公司发布财报的日期",
+    statDate:"财报统计的季度的最后一天, 比如2017-03-31, 2017-06-30",
+    CAToAsset:"流动资产除以总资产",
+    NCAToAsset:"非流动资产除以总资产",
+    tangibleAssetToAsset:"有形资产除以总资产",
+    ebitToInterest:"已获利息倍数 息税前利润/利息费用",
+    CFOToOR:"经营活动产生的现金流量净额除以营业收入",
+    CFOToNP:"经营性现金净流量除以净利润",
+    CFOToGr:"经营性现金净流量除以营业总收入",
+  },
+  dupont:{
+    code:"证券代码",
+    pubDate:"公司发布财报的日期",
+    statDate:"财报统计的季度的最后一天, 比如2017-03-31, 2017-06-30",
+    dupontROE:"净资产收益率 归属母公司股东净利润/[(期初归属母公司股东的权益+期末归属母公司股东的权益)/2]\\*100%",
+    dupontAssetStoEquity:"权益乘数，反映企业财务杠杆效应强弱和财务风险 平均总资产/平均归属于母公司的股东权益",
+    dupontAssetTurn:"总资产周转率，反映企业资产管理效率的指标 营业总收入/[(期初资产总额+期末资产总额)/2]",
+    dupontPnitoni:"归属母公司股东的净利润/净利润，反映母公司控股子公司百分比。如果企业追加投资，扩大持股比例，则本指标会增加。",
+    dupontNitogr:"净利润/营业总收入，反映企业销售获利率",
+    dupontTaxBurden:"净利润/利润总额，反映企业税负水平，该比值高则税负较低。净利润/利润总额=1-所得税/利润总额",
+    dupontIntburden:"利润总额/息税前利润，反映企业利息负担，该比值高则税负较低。利润总额/息税前利润=1-利息费用/息税前利润",
+    dupontEbittogr:"息税前利润/营业总收入，反映企业经营利润率，是企业经营获得的可供全体投资人（股东和债权人）分配的盈利占企业全部营收收入的百分比",
+  },
+  express:{
+    code:"证券代码",
+    performanceExpPubDate:"业绩快报披露日",
+    performanceExpStatDate:"业绩快报统计日期",
+    performanceExpUpdateDate:"业绩快报披露日(最新)",
+    performanceExpressTotalAsset:"业绩快报总资产",
+    performanceExpressNetAsset:"业绩快报净资产",
+    performanceExpressEPSChgPct:"业绩每股收益增长率",
+    performanceExpressROEWa:"业绩快报净资产收益率ROE-加权",
+    performanceExpressEPSDiluted:"业绩快报每股收益EPS-摊薄",
+    performanceExpressGRYOY:"业绩快报营业总收入同比",
+    performanceExpressOPYOY:"业绩快报营业利润同比",
+  },
+  forecast:{
+    code:"证券代码",
+    profitForcastExpPubDate:"业绩预告发布日期",
+    profitForcastExpStatDate:"业绩预告统计日期",
+    profitForcastType:"业绩预告类型",
+    profitForcastAbstract:"业绩预告摘要",
+    profitForcastChgPctUp:"预告归属于母公司的净利润增长上限(%)",
+    profitForcastChgPctDwn:"预告归属于母公司的净利润增长下限(%)",
+  },
+  basic:{
+    code:"证券代码",
+    ipoDate:"上市日期",
+    outDate:"退市日期",
+    type:"证券类型，其中1：股票，2：指数，3：其它，4：可转债，5：ETF",
+    status:"上市状态，其中1：上市，0：退市",
+  },
+};
+
+async function jpost(url,body){
+  const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});
+  return r.json();
+}
+
+function setStatus(which,html,cls){ const el=$('st_'+which); if(el){ el.innerHTML=html; el.className='status'+(cls?' '+cls:''); } }
+
+function renderCard(def){
+  const card=document.createElement('div'); card.className='card';
+  card.id='card_'+def.key;
+  card.innerHTML=`
+    <div class="card-head">
+      <h2 title="${HELP[def.key]||def.title}">${def.title}</h2>
+      <span class="status" id="st_${def.key}">未请求</span>
+      <button class="btn" data-fetch="${def.key}">获取</button>
+    </div>
+    <div class="card-body" id="bd_${def.key}"><div class="none">点击「获取」获取该数据项</div></div>`;
+  $('cards').appendChild(card);
+}
+
+async function fetchKind(key, silent){
+  setStatus(key,'<span class="mini-spin"></span>请求中…','loading');
+  if(!silent){ $('allStatus').innerHTML=''; }
+  try{
+    const r=await jpost('/api/stock/data',{code:CODE,kind:key});
+    if(r.ok!==false && r.fields){
+      setStatus(key,'成功','ok');
+      $('bd_'+key).innerHTML=buildTable(r.fields,r.rows,key);
+      DATA[key]={fields:r.fields, rows:r.rows};
+      return true;
+    }
+    setStatus(key,'失败','err');
+    $('bd_'+key).innerHTML=`<div class="err">${r.error||'查询失败'}</div>`;
+    return false;
+  }catch(e){
+    setStatus(key,'失败','err');
+    $('bd_'+key).innerHTML=`<div class="err">请求异常：${e.message}</div>`;
+    return false;
+  }
+}
+
+function buildTable(fields,rows,key){
+  if(!rows || !rows.length){ return '<div class="none">（无数据）</div>'; }
+  const fh=FIELD_HELP[key]||{};
+  const head=fields.map(f=>`<th title="${fh[f]?`${f}：${fh[f]}`:`字段 ${f}（暂无说明）`}">${f}</th>`).join('');
+  const body=rows.map(r=>`<tr>${r.map(c=>`<td>${c===''?'&nbsp;':c}</td>`).join('')}</tr>`).join('');
+  return `<div class="tbl-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
+function toXueqiuCode(s){
+  // 纯数字代码(如 600000)或带 sh./sz. 前缀，转雪球 SH/SZ 格式
+  let t=(s||' ').trim().toLowerCase();
+  if(t.startsWith('sh.')) return 'SH'+t.slice(3);
+  if(t.startsWith('sz.')) return 'SZ'+t.slice(3);
+  t=t.replace(/\D/g,'');
+  return (t.startsWith('6')?'SH':'SZ')+t;
+}
+
+// 生成复制文本：股票代码/名称 + 每个已获取数据项的表头(含字段说明)与数据行
+function buildCopyText(){
+  const lines=[`股票代码：${CODE}   股票名称：${NAME||''}`];
+  KINDS.forEach(def=>{
+    const d=DATA[def.key];
+    if(!d) return;  // 未获取的项不复制
+    const fh=FIELD_HELP[def.key]||{};
+    lines.push('');
+    lines.push(`【${def.title}】`);
+    lines.push('列说明：');
+    d.fields.forEach(f=>{
+      lines.push(`  ${f}：${fh[f]||'(暂无说明)'}`);
+    });
+    lines.push('数据：');
+    if(!d.rows || !d.rows.length){
+      lines.push('  （无数据）');
+    }else{
+      d.rows.forEach(r=>lines.push('  '+r.join('\t')));
+    }
+  });
+  return lines.join('\n');
+}
+
+async function copyAll(){
+  const got=Object.keys(DATA).length;
+  if(got===0){
+    $('allStatus').textContent='请先获取至少一项数据';
+    $('allStatus').className='status warn';
+    return;
+  }
+  const text=buildCopyText();
+  try{
+    await navigator.clipboard.writeText(text);
+    $('allStatus').textContent=`已复制 ${got} 项数据到剪贴板`;
+    $('allStatus').className='status ok';
+  }catch(e){
+    // 降级：使用隐藏文本框复制
+    const ta=document.createElement('textarea');
+    ta.value=text; document.body.appendChild(ta);
+    ta.select(); try{ document.execCommand('copy'); $('allStatus').textContent=`已复制 ${got} 项数据到剪贴板`; $('allStatus').className='status ok'; }
+    catch(_e){ $('allStatus').textContent='复制失败：'+e.message; $('allStatus').className='status err'; }
+    ta.remove();
+  }
+}
+
+function init(){
+  $('code').textContent=CODE;
+  $('name').textContent=NAME||'个股';
+  $('btnXq').addEventListener('click',()=>{
+    window.open('https://xueqiu.com/S/'+toXueqiuCode(CODE),'_blank');
+  });
+  $('btnCopy').addEventListener('click',copyAll);
+  KINDS.forEach(renderCard);
+  document.querySelectorAll('[data-fetch]').forEach(b=>{
+    b.addEventListener('click',()=>fetchKind(b.getAttribute('data-fetch')));
+  });
+  $('btnAll').addEventListener('click',async ()=>{
+    $('btnAll').disabled=true; $('allStatus').textContent='正在获取全部数据…'; $('allStatus').className='status';
+    let done=0, ok=0;
+    for(const def of KINDS){
+      const success=await fetchKind(def.key, true);
+      done++; if(success) ok++;
+      $('allStatus').textContent=`已获取 ${done}/${KINDS.length}（成功 ${ok}）…`;
+    }
+    $('btnAll').disabled=false;
+    $('allStatus').textContent=`全部完成：成功 ${ok}/${KINDS.length}`;
+    $('allStatus').className='status'+(ok===KINDS.length?' ok':' err');
+  });
+}
+init();
+</script>
+</body>
+</html>
