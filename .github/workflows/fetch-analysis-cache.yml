@@ -79,6 +79,9 @@ jobs:
         # continue-on-error 让后续压缩/推送照常执行（上传已有的、可能是部分的数据）。
         timeout-minutes: 350
         continue-on-error: true
+        # PYTHONUNBUFFERED=1 关闭 Python 的块缓冲，确保每行 print 实时输出到 Actions 日志
+        env:
+          PYTHONUNBUFFERED: "1"
         run: uv run python webconsole/auto_cache.py
 
       - name: 校验缓存文件并分卷压缩
