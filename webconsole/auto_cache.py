@@ -41,14 +41,28 @@ def prev_trade_day(eng, from_date: str) -> str:
 
 
 def pick_target_date(eng) -> str:
-    """按北京时间判定本次要分析的工作日。"""
+    """按北京时间判定本次要分析的工作日，并把每一步判定过程打到日志。"""
     now = beijing_now()
     today = now.strftime("%Y-%m-%d")
+    print(f"[auto-cache] 当前北京时间：{now.strftime('%Y-%m-%d %H:%M:%S')}（时区 Asia/Shanghai）")
+    print(f"[auto-cache] 当前日期：{today}")
+
     if now.hour < 16:
-        return prev_trade_day(eng, today)
-    if eng.has_trade_date(today):
-        return today
-    return prev_trade_day(eng, today)
+        # 16:00（含）之前：当天还没收盘，取上一工作日
+        print(f"[auto-cache] 判定：{now.hour} 点在 16:00 之前，取上一工作日（当天未收盘）")
+        target = prev_trade_day(eng, today)
+        print(f"[auto-cache] 上一工作日：{target}")
+    elif eng.has_trade_date(today):
+        # 16:00 之后且当天有行情：取当天
+        print(f"[auto-cache] 判定：{now.hour} 点在 16:00 之后，且 {today} 有当日行情，取当天")
+        target = today
+    else:
+        # 16:00 之后但当天未开市（休息日）：取上一工作日
+        print(f"[auto-cache] 判定：{now.hour} 点在 16:00 之后，但 {today} 未开市（无当日行情），取上一工作日")
+        target = prev_trade_day(eng, today)
+        print(f"[auto-cache] 上一工作日：{target}")
+    print(f"[auto-cache] 最终目标分析日：{target}")
+    return target
 
 
 def main() -> int:
