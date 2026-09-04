@@ -670,7 +670,7 @@ async function openBatch(key, reopen=false){
           batchLog(log,`<b>完成：共 ${m.total} 项，成功 ${m.ok}，失败 ${m.fail}</b>`);
         }
       },
-      ()={}  // 流结束（含中断）由 finally 统一收尾
+      ()=>{}  // 流结束（含中断）由 finally 统一收尾
     );
   }catch(e){
     batchLog(log,`<span class="fail">请求失败：${e.message}</span>`);

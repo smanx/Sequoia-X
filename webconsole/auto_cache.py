@@ -93,6 +93,27 @@ def main() -> int:
     # 1. 单日分析：汇聚全部策略命中股票
     results, all_codes = analyze_day(target)
     codes = sorted(all_codes)
+
+    # 把"当日选出的股票列表"也写入缓存（analysis_cache 表，与 12 类个股数据同库），
+    # 随 stock_cache.db 一并上传；前端分析时勾选缓存即可直接复用该列表。
+    try:
+        from app import _save_analysis_cache
+
+        name_map = eng.get_symbol_names()
+        futures: dict = {}
+        for code in codes:
+            try:
+                futures[code] = eng.future_returns(code, target)
+            except Exception:  # noqa: BLE001
+                futures[code] = []
+        _save_analysis_cache(target, {
+            "results": results,
+            "names": {c: name_map.get(c, "") for c in codes},
+            "futures": futures,
+        })
+        print(f"[auto-cache] 已缓存当日分析列表（{len(codes)} 只命中股票）到缓存库")
+    except Exception as exc:  # noqa: BLE001  (缓存失败不影响后续拉取)
+        print(f"[auto-cache] 写入分析列表缓存失败（跳过）：{exc}")
     if not codes:
         print("[auto-cache] 当日无任何策略命中，直接结束（仍会上传现有缓存）")
         return 0

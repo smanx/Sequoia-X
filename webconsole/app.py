@@ -65,8 +65,9 @@ ONLINE_STOCK_CACHE_PATH = str((BASE_DIR.parent / "data" / "stock_cache_online.db
 LOCAL_STOCK_CACHE_PATH = str((BASE_DIR.parent / "data" / "stock_cache.db").resolve())
 _CACHE_SOURCE = "local"  # local=本地缓存，online=在线缓存
 
-# 每日单次分析结果缓存（"每天选出来的股票列表"），按 as_of 日期独立存储
-ANALYSIS_CACHE_PATH = str((BASE_DIR.parent / "data" / "analysis_cache.db").resolve())
+# 每日单次分析结果缓存（"每天选出来的股票列表"）写入当前缓存源库的 analysis_cache 表，
+# 与 12 类个股数据共用同一缓存库文件，随 stock_cache.db 一并压缩上传 / 合并。
+# 具体路径沿用 _get_stock_cache() 的活动缓存源（local/online）。
 
 # ── Web Basic 认证：默认 admin/admin，可用环境变量 SEQUOIA_USER / SEQUOIA_PASS 修改 ──
 AUTH_USER = os.environ.get("SEQUOIA_USER", "admin")
@@ -598,11 +599,15 @@ def _cache_rows(path: str) -> int:
         return 0
 
 
-# ── 当日分析结果缓存（按日期缓存 "选出来的股票列表"） ──
+# ── 当日分析结果缓存（按日期缓存 "选出来的股票列表"，存入当前缓存源库） ──
 
 def _analysis_conn() -> sqlite3.Connection:
-    """返回分析结果缓存库连接（独立于行情库与个股数据缓存库）。"""
-    conn = sqlite3.connect(ANALYSIS_CACHE_PATH, timeout=20, check_same_thread=False)
+    """返回当前缓存源库连接，并确保其中存在 analysis_cache 表。
+
+    与 12 类个股数据共用同一个缓存库（local/online），随其一并上传/合并。
+    """
+    path = _get_stock_cache().path
+    conn = sqlite3.connect(path, timeout=20, check_same_thread=False)
     try:
         conn.execute("PRAGMA busy_timeout=20000")
         conn.execute("PRAGMA journal_mode=WAL")
