@@ -17,9 +17,9 @@ name: Fetch Analysis Cache & Push
 permissions:
   contents: write
 
-concurrency:
-  group: fetch-analysis-cache
-  cancel-in-progress: false
+# 允许多个运行同步执行，不再用 concurrency 串行排队。
+# 注意：多个实例同时向同一个 cache 分支推送可能产生推送冲突/竞争，
+# 若某次 push 失败，重跑该次即可（分析结果已在本地库，重跑会合并后重传）。
 
 jobs:
   fetch-and-push:
