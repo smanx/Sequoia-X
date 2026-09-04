@@ -98,6 +98,28 @@ def main() -> int:
         return 0
     print(f"[auto-cache] 当日命中 {len(codes)} 只股票，开始逐只获取 12 类明细数据（串行、边取边存）")
 
+    # 打印缓存现状统计：当日本地缓存记录数、命中股票数、命中股票中已有缓存的数量
+    try:
+        from app import _get_stock_cache
+        import sqlite3
+
+        sc = _get_stock_cache()
+        conn_cache = sqlite3.connect(sc.path, timeout=20)
+        total_for_date = conn_cache.execute(
+            "SELECT COUNT(*) FROM stock_cache WHERE asof=?", (target,)
+        ).fetchone()[0]
+        ph = ",".join("?" * len(codes))
+        hit_with_cache = conn_cache.execute(
+            f"SELECT COUNT (DISTINCT code) FROM stock_cache WHERE asof=? AND code IN ({ph})",
+            [target, *codes],
+        ).fetchone()[0]
+        conn_cache.close()
+        print(f"[auto-cache] 当日本地缓存记录数（asof={target}）：{total_for_date} 条")
+        print(f"[auto-cache] 当日命中股票数：{len(codes)} 只")
+        print(f"[auto-cache] 命中股票中已有本地缓存的有：{hit_with_cache} 只")
+    except Exception as exc:  # noqa: BLE001  (统计失败不影响主流程)
+        print(f"[auto-cache] 缓存现状统计失败（跳过）：{exc}")
+
     deadline = time.time() + budget
     total_ok = 0
     total_fail = 0
