@@ -227,6 +227,7 @@
         </select>
       </div>
       <button class="btn" id="btnCsFetch" style="display:none">获取在线缓存</button>
+      <label class="check" id="csForceWrap" style="display:none"><input type="checkbox" id="csForce">强制获取（忽略本地已有缓存）</label>
       <div id="csStatus" class="hint" style="margin-top:6px;flex-basis:100%"></div>
     </div>
     <div class="hint">本地数据源为当前 `data/sequoia_v2.db`；切换到在线数据源后，点"获取在线数据源"从 GitHub 下载打包的分卷数据库（`sequoia_v2.tar.gz.aa/.ab/...`）并解压到本地单独存放，不影响本地默认库。"数据缓存"同理：在线缓存从 cache 分支下载 `stock_cache.tar.gz.*` 解压到单独的在线缓存库，切换后个股数据查询会复用该预取缓存。</div>
@@ -1003,8 +1004,8 @@ btnDsFetch.onclick=async ()=>{
 };
 
 // ── 在线缓存切换（个股数据缓存）：local=本地缓存，online=在线缓存 ──
-const csSel=$('csSel'), btnCsFetch=$('btnCsFetch'), csStatus=$('csStatus');
-function syncCsBtn(){ btnCsFetch.style.display=csSel.value==='online'?'':'none'; }
+const csSel=$('csSel'), btnCsFetch=$('btnCsFetch'), csStatus=$('csStatus'), csForce=$('csForce'), csForceWrap=$('csForceWrap');
+function syncCsBtn(){ const o=csSel.value==='online'; btnCsFetch.style.display=o?'':'none'; csForceWrap.style.display=o?'':'none'; }
 function csMsg(html){ csStatus.innerHTML=html; }
 async function loadCache(){
   try{
@@ -1038,14 +1039,15 @@ function renderLogLines(r){
 }
 btnCsFetch.onclick=async ()=>{
   btnCsFetch.disabled=true;
-  csMsg('<span class="spin"></span>先检查本地缓存，判断是否需要获取在线缓存...');
+  const force=csForce.checked;
+  csMsg('<span class="spin"></span>'+(force?'强制获取在线缓存（忽略本地已有缓存）...':'先检查本地缓存，判断是否需要获取在线缓存...'));
   try{
-    const r=await jpost('/api/online-cache/fetch',{});
+    const r=await jpost('/api/online-cache/fetch',{force});
     if(r.ok){
       if(r.skipped){
         // 本地已有数据，跳过获取；不切换缓存源
         csSel.value=(r&&r.source)||'local'; syncCsBtn();
-        csMsg(`<span class="warn">本地缓存已有 ${r.local_rows||0} 条数据，无需获取在线缓存（已跳过）</span>`+renderLogLines(r));
+        csMsg(`<span class="warn">本地缓存已有 ${r.local_rows||0} 条数据，无需获取在线缓存（已跳过）。如仍要下载在线缓存，请勾选「强制获取」后再点一次。</span>`+renderLogLines(r));
       }else{
         csSel.value='online'; syncCsBtn();
         const info=(r&&r.info)||{};

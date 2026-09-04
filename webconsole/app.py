@@ -922,13 +922,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(500, {"ok": False, "error": str(exc)})
 
         elif path == "/api/online-cache/fetch":
-            # 获取在线缓存：规则是先看本地缓存，本地已有数据则无需再取在线缓存；
-            # 仅当本地无数据时才从 cache 分支下载并解压。每一步都输出明细日志。
+            # 获取在线缓存：默认先看本地缓存，本地已有数据则跳过（避免重复下载）；
+            # 勾选 force 时可忽略本地、强制从 cache 分支下载并解压到在线缓存库。
+            # 每一步都输出明细日志。
             try:
                 t0 = time.time()
                 log: list = []
+                force = bool(data.get("force"))
                 local_rows = _cache_rows(LOCAL_STOCK_CACHE_PATH)
-                if local_rows and local_rows > 0:
+                if not force and local_rows and local_rows > 0:
                     log.append(f"本地缓存已有 {local_rows} 条数据，无需获取在线缓存，跳过下载")
                     print(f"[online-cache] {log[-1]}")
                     self._send(200, {
@@ -936,7 +938,9 @@ class Handler(BaseHTTPRequestHandler):
                         "local_rows": local_rows, "log": log,
                     })
                     return
-                log.append(f"本地缓存无数据，开始获取在线缓存（{LOCAL_STOCK_CACHE_PATH}）")
+                log.append(f"本地缓存{local_rows or 0} 条" +
+                           ("；用户选择强制获取在线缓存" if force else "，开始获取在线缓存") +
+                           f"（{LOCAL_STOCK_CACHE_PATH}）")
                 db = fetch_online_cache(log)
                 from pathlib import Path as _P
                 self._send(200, {
