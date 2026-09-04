@@ -657,7 +657,7 @@ async function openBatch(key, reopen=false){
             log.appendChild(line); lineOf[k]=line;
           }
           if(m.ok){
-            line.innerHTML=`<span class="ok">[${m.idx}/${codes.length}]</span> ${m.code} ${m.name||''} → ${m.title} <span class="ok">成功</span>`;
+            line.innerHTML=`<span class="ok">[${m.idx}/${codes.length}]</span> ${m.code} ${m.name||''} → ${m.title} <span class="ok">成功${m.cached?'（缓存获取）':'（在线获取）'}</span>`;
           }else{
             line.innerHTML=`<span class="warn">[${m.idx}/${codes.length}]</span> ${m.code} ${m.name||''} → ${m.title} <span class="fail">失败：${m.error||'无数据'}</span>`;
           }

@@ -711,9 +711,10 @@ def _bs_query(bscode: str, kind: str, as_of: str | None = None) -> tuple[list, l
             return _query_kind(bs, bscode, kind, as_of)
 
 
-def query_stock_data(code: str, kind: str, as_of: str | None = None) -> dict:
-    """查询个股 baostock 数据并本地缓存，返回 {"fields": [...], "rows": [[...], ...]}。
+def query_stock_data(code: str, kind: str, as_of: str | None = None) -> tuple[dict, bool]:
+    """查询个股 baostock 数据并本地缓存，返回 ({"fields": [...], "rows": [[...], ...]}, from_cache)。
 
+    from_cache 标记本次结果来自缓存(True)还是在线实时获取(False)。
     as_of 为数据截止日期（可选）：传入后可查看/缓存该历史时点的数据；
     为 None 时取到今天。缓存键含 as_of，不同时点数据互不覆盖。
 
@@ -726,13 +727,13 @@ def query_stock_data(code: str, kind: str, as_of: str | None = None) -> dict:
     as_of_key = (as_of or "").strip() or "latest"
     cached = cache.get(bscode, kind, as_of_key)
     if cached is not None:
-        return cached
+        return cached, True
     fields, rows = _bs_query(bscode, kind, as_of)
     if not fields:
         raise RuntimeError("该数据种类无返回数据（可能该股无此类信息）")
     result = {"fields": fields, "rows": rows}
     cache.set(bscode, kind, as_of_key, result)
-    return result
+    return result, False
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1120,11 +1121,11 @@ class Handler(BaseHTTPRequestHandler):
                     for kd in STOCK_KINDS:
                         kind = kd["key"]
                         try:
-                            r = query_stock_data(code, kind, as_of)  # 内存→SQLite→baostock，命中即复用缓存
+                            r, from_cache = query_stock_data(code, kind, as_of)  # 内存→SQLite→baostock，命中即复用缓存
                             buf[code][kind] = r
                             ok += 1
                             emit({"type": "item", "idx": si, "code": code, "name": nm,
-                                  "title": kd["title"], "ok": True})
+                                  "title": kd["title"], "ok": True, "cached": from_cache})
                         except Exception as exc:  # noqa: BLE001
                             buf[code][kind] = None
                             fail += 1
@@ -1143,7 +1144,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             as_of = (data.get("as_of") or "").strip() or None
             try:
-                self._send(200, {"ok": True, "as_of": as_of or "latest", **query_stock_data(code, kind, as_of)})
+                r, from_cache = query_stock_data(code, kind, as_of)
+                self._send(200, {"ok": True, "as_of": as_of or "latest", "cached": from_cache, **r})
             except Exception as exc:  # noqa: BLE001
                 logger.error("个股数据查询失败 code=%s kind=%s: %s", code, kind, exc)
                 self._send(500, {"ok": False, "error": str(exc)})
