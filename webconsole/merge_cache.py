@@ -1,4 +1,4 @@
-"""合并多个个股缓存 SQLite 库到基准库，剔除重复键。
+"""合并多个缓存 SQLite 库到基准库，剔除重复键。
 
 合并两张表：
 - stock_cache   键 (code, kind, asof)：12 类个股明细数据
@@ -15,21 +15,15 @@ import argparse
 import sqlite3
 import sys
 
-# 表名 -> (主键列, 数据列)
+# 表名 -> (cols=全部数据列(含 updated_at), key=主键列)
 TABLES = {
     "stock_cache": {
-        "pkey": "code,kind,asof",
-        "sel": "code,kind,asof,payload,updated_at",
-        "ins": "code,kind,asof,payload,updated_at",
-        "params": lambda r: (r[0], r[1], r[2], r[3], r[4]),
-        "wh": "code=? AND kind=? AND asof=?",
+        "cols": ["code", "kind", "asof", "payload", "updated_at"],
+        "key": ["code", "kind", "asof"],
     },
     "analysis_cache": {
-        "pkey": "asof",
-        "sel": "asof,payload,updated_at",
-        "ins": "asof,payload,updated_at",
-        "params": lambda r: (r[0], r[1], r[2]),
-        "wh": "asof=?",
+        "cols": ["asof", "payload", "updated_at"],
+        "key": ["asof"],
     },
 }
 
@@ -73,8 +67,15 @@ def main() -> int:
             continue
         any_rows = False
         for t, spec in TABLES.items():
+            cols = spec["cols"]
+            key_cols = spec["key"]
+            ins_clause = ",".join(cols)
+            ph = ",".join("?" * len(cols))
+            key_where = " AND ".join(f"{c}=?" for c in key_cols)
+            upd_cols = [c for c in cols if c != "updated_at"]
+            upd_set = ", ".join(f"{c}=?" for c in (upd_cols + ["updated_at"]))
             try:
-                rows = s.execute(f"SELECT {spec['sel']} FROM {t}").fetchall()
+                rows = s.execute(f"SELECT {ins_clause} FROM {t}").fetchall()
             except sqlite3.Error:
                 rows = []  # 源库没有该表（旧版本），跳过
             if not rows:
@@ -82,21 +83,16 @@ def main() -> int:
             any_rows = True
             new = upd = dup = 0
             for r in rows:
+                key_params = [r[cols.index(c)] for c in key_cols]
                 cur = base.execute(
-                    f"SELECT updated_at FROM {t} WHERE {spec['wh']}", spec["params"](r)
+                    f"SELECT updated_at FROM {t} WHERE {key_where}", key_params
                 ).fetchone()
                 if cur is None:
-                    base.execute(f"INSERT INTO {t}({spec['ins']}) VALUES({','.join('?'*len(spec['ins'].split(',')))})", list(r))
+                    base.execute(f"INSERT INTO {t}({ins_clause}) VALUES({ph})", list(r))
                     new += 1
                 elif r[-1] > cur[0]:
-                    cols = spec["ins"].split(",")
-                    upd_cols = [c for c in cols if c != "updated_at"]
-                    set_clause = ", ".join(f"{c}=?" for c in upd_cols)
-                    vals = [r[cols.index(c)] for c in upd_cols] + [r[-1]]
-                    base.execute(
-                        f"UPDATE {t} SET {set_clause}, updated_at=? WHERE {spec['wh']}",
-                        vals + list(spec["params"](r)),
-                    )
+                    upd_vals = [r[cols.index(c)] for c in upd_cols] + [r[-1]] + key_params
+                    base.execute(f"UPDATE {t} SET {upd_set} WHERE {key_where}", upd_vals)
                     upd += 1
                 else:
                     dup += 1
