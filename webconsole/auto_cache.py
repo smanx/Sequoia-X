@@ -69,10 +69,25 @@ def main() -> int:
     # 复用 webconsole 的引擎 / 分析 / 个股查询 / 明细种类定义
     from app import STOCK_KINDS, analyze_day, get_engine, query_stock_data
 
+    import argparse
+
+    ap = argparse.ArgumentParser(description="自动分析缓存")
+    ap.add_argument("--date", help="手动指定分析日期（YYYY-MM-DD）；未指定则按北京时间自动判定目标日")
+    args = ap.parse_args()
+
     budget = float(os.environ.get("AUTO_CACHE_BUDGET", str(5 * 3600 + 40 * 60)))  # 秒，默认 5 小时 40 分钟
 
     eng = get_engine()
-    target = pick_target_date(eng)
+
+    if args.date:
+        # 手动运行：指定日期则只用该日期；无数据直接结束
+        target = args.date.strip()
+        print(f"[auto-cache] 手动指定日期：{target}（跳过北京时间自动判定）")
+        if not eng.has_trade_date(target):
+            print(f"[auto-cache] 指定日期 {target} 无行情数据（非交易日或库中未获取），直接结束")
+            return 0
+    else:
+        target = pick_target_date(eng)
     print(f"[auto-cache] 目标分析日（北京时间）：{target}")
 
     # 1. 单日分析：汇聚全部策略命中股票

@@ -4,6 +4,12 @@ name: Fetch Analysis Cache & Push
 # 启动后在 Python 脚本内按北京时间判断：16 点前取上一工作日，16 点后取当天（未开市则取上一工作日）。
 "on":
   workflow_dispatch:
+    inputs:
+      date:
+        description: "手动指定分析日期（YYYY-MM-DD）；留空则按北京时间自动判定"
+        required: false
+        default: ""
+        type: string
   schedule:
     - cron: "30 8 * * *"
 
@@ -82,7 +88,12 @@ jobs:
         # PYTHONUNBUFFERED=1 关闭 Python 的块缓冲，确保每行 print 实时输出到 Actions 日志
         env:
           PYTHONUNBUFFERED: "1"
-        run: uv run python webconsole/auto_cache.py
+        run: |
+          if [ -n "${{ github.event.inputs.date }}" ]; then
+            uv run python webconsole/auto_cache.py --date "${{ github.event.inputs.date }}"
+          else
+            uv run python webconsole/auto_cache.py
+          fi
 
       - name: 上传前拉取远程最新缓存并合并（剔除重复）
         # 分析耗时数小时，期间远程 cache 分支可能又更新过；上传前再拉一次，
