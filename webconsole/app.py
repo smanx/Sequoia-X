@@ -1076,6 +1076,59 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:  # noqa: BLE001
                 self._send(500, {"ok": False, "error": str(exc)})
 
+        elif path == "/api/stock/batch":
+            # 长接口：前端一次提交整份股票列表，后端逐项取数（自动复用缓存），
+            # 每处理一项即通过 NDJSON 流式把日志 / 结果回传前端，最后返回 done 全文。
+            codes = data.get("codes") or []
+            if not isinstance(codes, list) or not codes:
+                self._send(400, {"error": "需要非空 codes 列表"})
+                return
+            as_of = (data.get("as_of") or "").strip() or None
+            name_map = get_engine().get_symbol_names()
+
+            # 建立长响应（流式 NDJSON），设置输出头后逐行写入
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/x-ndjson")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("X-Accel-Buffering", "no")
+                self.end_headers()
+            except Exception:  # noqa: BLE001
+                return
+
+            def emit(obj) -> None:
+                try:
+                    self.wfile.write((json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8"))
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+                    raise  # 客户端中断，交由外层静默结束
+
+            try:
+                buf: dict = {}
+                ok = fail = 0
+                total = len(codes) * len(STOCK_KINDS)
+                emit({"type": "start", "count": len(codes)})
+                for si, code in enumerate(codes, 1):
+                    code = str(code).strip()
+                    buf[code] = {}
+                    nm = (name_map or {}).get(code, "")
+                    for kd in STOCK_KINDS:
+                        kind = kd["key"]
+                        try:
+                            r = query_stock_data(code, kind, as_of)  # 内存→SQLite→baostock，命中即复用缓存
+                            buf[code][kind] = r
+                            ok += 1
+                            emit({"type": "item", "idx": si, "code": code, "name": nm,
+                                  "title": kd["title"], "ok": True})
+                        except Exception as exc:  # noqa: BLE001
+                            buf[code][kind] = None
+                            fail += 1
+                            emit({"type": "item", "idx": si, "code": code, "name": nm,
+                                  "title": kd["title"], "ok": False, "error": str(exc)})
+                emit({"type": "done", "total": total, "ok": ok, "fail": fail, "data": buf})
+            except Exception:  # noqa: BLE001  (客户端中断写失败等，静默结束)
+                pass
+
         elif path == "/api/stock/data":
             # 个股 baostock 数据查询：{code, kind} -> {fields, rows}
             code = (data.get("code") or "").strip()
