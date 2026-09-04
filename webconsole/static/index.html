@@ -267,6 +267,11 @@
           <option value="single">单线程（串行）</option>
         </select>
       </div>
+      <div class="field" id="useCacheWrap" style="display:none">
+        <label>结果缓存</label>
+        <label class="check"><input type="checkbox" id="useCache"> 使用缓存</label>
+        <div class="hint" style="margin-top:2px">命中当日缓存则直接返回，不重算</div>
+      </div>
     </div>
     <div class="row">
       <div class="field"><label>范围起始</label>
@@ -767,7 +772,7 @@ $('calPop').addEventListener('click',(ev)=>{
     renderCal(); return;
   }
   const day=ev.target.closest('.cal-day[data-val]');
-  if(day){ setDate(calFor, day.dataset.val); closeCal(); }
+  if(day){ setDate(calFor, day.dataset.val); closeCal(); if(calFor==='analyzeDate') updateCacheCheckbox(); }
 });
 document.addEventListener('click',(ev)=>{
   const dp=ev.target.closest('.dp');
@@ -801,6 +806,18 @@ $('btnUpdateStop').onclick=async ()=>{
 
 $('btnAnalyze').onclick=async ()=>runAnalyze();
 
+// 结果缓存勾选框：仅当所选日期已有分析缓存时才显示；勾选后命中缓存直接返回
+async function updateCacheCheckbox(){
+  const wrap=$('useCacheWrap'), d=$('analyzeDate').value;
+  if(!wrap) return;
+  if(!d){ wrap.style.display='none'; $('useCache').checked=false; return; }
+  try{
+    const r=await jget('/api/analyze_cache?date='+encodeURIComponent(d));
+    if(r.cached){ wrap.style.display=''; $('useCache').checked=true; }
+    else { wrap.style.display='none'; $('useCache').checked=false; }
+  }catch(e){ wrap.style.display='none'; }
+}
+
 // 单日分析：返回响应对象（供上下一天切换复用）
 async function runAnalyze(){
   const d=$('analyzeDate').value;
@@ -812,13 +829,14 @@ async function runAnalyze(){
   setStatus(`<span class="spin"></span>正在分析 ${d} ...`);
   const t0=Date.now();
   try{
-    const r=await jpost('/api/analyze',{date:d, mode:$('modeSel').value});
+    const useCache=!!$('useCacheWrap') && $('useCache').checked;
+    const r=await jpost('/api/analyze',{date:d, mode:$('modeSel').value, use_cache:useCache});
     if(!r.ok){
       setStatus(r.canceled?`<span class="warn">分析已取消</span>`:`<span class="err">分析失败：${r.error||'未知'}</span>`);
       return r;
     }
     const sec=((Date.now()-t0)/1000).toFixed(1);
-    setStatus(`<span class="ok">完成，用时 ${sec}s · ${d}</span>`);
+    setStatus(`<span class="ok">完成，用时 ${sec}s · ${d}${r.from_cache?'（来自结果缓存）':''}</span>`);
     lastAsOf=d;
     renderTabs(keys, r.results, r.names||{}, r.futures||{});
     return r;
@@ -841,10 +859,11 @@ async function shiftDay(dir){
     if(dbMax && dir>0 && d>dbMax){ release(); setStatus('<span class="warn">已是最后一个有数据的日期</span>'); return; }
     if(dbMin && dir<0 && d<dbMin){ release(); setStatus('<span class="warn">已是最早一个有数据的日期</span>'); return; }
     setDate('analyzeDate',d);
+    updateCacheCheckbox();
     setStatus(`<span class="spin"></span>正在分析 ${d} ...`);
     const t0=Date.now();
     let r;
-    try{ r=await jpost('/api/analyze',{date:d, mode:$('modeSel').value}); }
+    try{ r=await jpost('/api/analyze',{date:d, mode:$('modeSel').value, use_cache:!!$('useCache') && $('useCache').checked}); }
     catch(e){ release(); setStatus(`<span class="err">请求失败：${e.message}</span>`); return; }
     // 无数据：闭市/非交易日（ok:false 且提示该类型）或 ok:true 但分析条数为 0，都应视为"该日无数据"，继续跳
     const isNoData = !r.ok && /闭市|非交易日|无当日行情|无数据/i.test(r.error||'');
@@ -1011,7 +1030,7 @@ btnCsFetch.onclick=async ()=>{
   finally{ btnCsFetch.disabled=false; }
 };
 
-refreshInfo();
+refreshInfo().then(updateCacheCheckbox);
 renderChecks();
 loadDs();
 loadCache();

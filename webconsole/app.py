@@ -65,6 +65,9 @@ ONLINE_STOCK_CACHE_PATH = str((BASE_DIR.parent / "data" / "stock_cache_online.db
 LOCAL_STOCK_CACHE_PATH = str((BASE_DIR.parent / "data" / "stock_cache.db").resolve())
 _CACHE_SOURCE = "local"  # local=本地缓存，online=在线缓存
 
+# 每日单次分析结果缓存（"每天选出来的股票列表"），按 as_of 日期独立存储
+ANALYSIS_CACHE_PATH = str((BASE_DIR.parent / "data" / "analysis_cache.db").resolve())
+
 # ── Web Basic 认证：默认 admin/admin，可用环境变量 SEQUOIA_USER / SEQUOIA_PASS 修改 ──
 AUTH_USER = os.environ.get("SEQUOIA_USER", "admin")
 AUTH_PASS = os.environ.get("SEQUOIA_PASS", "admin")
@@ -595,6 +598,57 @@ def _cache_rows(path: str) -> int:
         return 0
 
 
+# ── 当日分析结果缓存（按日期缓存 "选出来的股票列表"） ──
+
+def _analysis_conn() -> sqlite3.Connection:
+    """返回分析结果缓存库连接（独立于行情库与个股数据缓存库）。"""
+    conn = sqlite3.connect(ANALYSIS_CACHE_PATH, timeout=20, check_same_thread=False)
+    try:
+        conn.execute("PRAGMA busy_timeout=20000")
+        conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.Error:
+        pass
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS analysis_cache("
+        "asof TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at REAL NOT NULL)"
+    )
+    conn.commit()
+    return conn
+
+
+def _load_analysis_cache(as_of: str) -> dict | None:
+    """读取某日分析结果缓存；未命中返回 None。"""
+    try:
+        conn = _analysis_conn()
+        try:
+            row = conn.execute(
+                "SELECT payload FROM analysis_cache WHERE asof=?", (as_of,)
+            ).fetchone()
+        finally:
+            conn.close()
+        return json.loads(row[0]) if row else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _save_analysis_cache(as_of: str, payload: dict) -> None:
+    """写入/覆盖某日分析结果缓存。"""
+    try:
+        conn = _analysis_conn()
+        try:
+            conn.execute(
+                "INSERT INTO analysis_cache(asof, payload, updated_at) VALUES(?, ?, ?) "
+                "ON CONFLICT(asof) DO UPDATE SET "
+                "payload=excluded.payload, updated_at=excluded.updated_at",
+                (as_of, json.dumps(payload, ensure_ascii=False), time.time()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def cache_online_ready() -> bool:
     """在线缓存是否已获取：在线缓存文件存在且 stock_cache 表有数据。"""
     if not os.path.exists(ONLINE_STOCK_CACHE_PATH):
@@ -774,6 +828,18 @@ class Handler(BaseHTTPRequestHandler):
                 })
             except Exception as exc:  # noqa: BLE001
                 self._send(500, {"error": str(exc)})
+        elif path == "/api/analyze_cache":
+            # 查询某日分析结果是否已有缓存，供前端决定是否展示"使用缓存"勾选框
+            try:
+                as_of = urlparse(self.path).query
+                as_of = as_of.replace("date=", "").strip() if "date=" in as_of else ""
+                cached = _load_analysis_cache(as_of) if as_of else None
+                self._send(200, {
+                    "ok": True, "date": as_of,
+                    "cached": cached is not None,
+                })
+            except Exception as exc:  # noqa: BLE001
+                self._send(500, {"error": str(exc)})
         else:
             self._send(404, {"error": f"unknown path {path}"}, "text/plain")
 
@@ -886,6 +952,7 @@ class Handler(BaseHTTPRequestHandler):
             if not as_of:
                 self._send(400, {"error": "需要 date"})
                 return
+            use_cache = bool(data.get("use_cache"))  # 勾选缓存：命中当日结果缓存则直接返回，不重算
             _CANCEL.clear()  # 新一次分析复位取消标志
             try:
                 eng = get_engine()
@@ -896,6 +963,13 @@ class Handler(BaseHTTPRequestHandler):
                         {"ok": False, "error": f"{as_of} 闭市或非交易日（库中无当日行情），本次不分析"},
                     )
                     return
+                if use_cache:
+                    cached = _load_analysis_cache(as_of)
+                    if cached is not None:
+                        self._send(200, {
+                            "ok": True, "date": as_of, "from_cache": True, **cached,
+                        })
+                        return
                 results, all_codes = analyze_day(as_of)
                 # 聚合所有命中股票的未来节点收益，供前端列表展示（多线程模式逐股票并行）
                 all_codes = sorted(all_codes)
@@ -913,11 +987,13 @@ class Handler(BaseHTTPRequestHandler):
                         check_cancel()
                         futures[code] = eng.future_returns(code, as_of)
                 name_map = eng.get_symbol_names()
-                self._send(200, {
-                    "ok": True, "date": as_of, "results": results,
+                payload = {
+                    "results": results,
                     "names": {c: name_map.get(c, "") for c in all_codes},
                     "futures": futures,
-                })
+                }
+                _save_analysis_cache(as_of, payload)  # 每次成功分析都写入缓存，供日后勾选复用
+                self._send(200, {"ok": True, "date": as_of, "from_cache": False, **payload})
             except AnalysisCanceled as exc:
                 self._send(200, {"ok": False, "canceled": True, "error": str(exc)})
             except Exception as exc:  # noqa: BLE001
