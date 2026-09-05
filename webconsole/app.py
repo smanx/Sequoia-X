@@ -711,13 +711,15 @@ def _bs_query(bscode: str, kind: str, as_of: str | None = None) -> tuple[list, l
             return _query_kind(bs, bscode, kind, as_of)
 
 
-def query_stock_data(code: str, kind: str, as_of: str | None = None) -> tuple[dict, bool]:
+def query_stock_data(code: str, kind: str, as_of: str | None = None,
+                     only_cache: bool = False) -> tuple[dict | None, bool]:
     """查询个股 baostock 数据并本地缓存，返回 ({"fields": [...], "rows": [[...], ...]}, from_cache)。
 
     from_cache 标记本次结果来自缓存(True)还是在线实时获取(False)。
     as_of 为数据截止日期（可选）：传入后可查看/缓存该历史时点的数据；
     为 None 时取到今天。缓存键含 as_of，不同时点数据互不覆盖。
 
+    only_cache=True 时仅读取缓存：命中返回缓存；未命中返回 (None, False)，不发起在线请求。
     查询顺序：内存缓存 → SQLite 缓存 → 真实 baostock 请求（回填两层缓存）。
     """
     if kind not in STOCK_KINDS_MAP:
@@ -728,6 +730,8 @@ def query_stock_data(code: str, kind: str, as_of: str | None = None) -> tuple[di
     cached = cache.get(bscode, kind, as_of_key)
     if cached is not None:
         return cached, True
+    if only_cache:
+        return None, False  # 仅缓存模式：未命中不联网
     fields, rows = _bs_query(bscode, kind, as_of)
     if not fields:
         raise RuntimeError("该数据种类无返回数据（可能该股无此类信息）")
@@ -963,6 +967,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(400, {"error": "需要 date"})
                 return
             use_cache = bool(data.get("use_cache"))  # 勾选缓存：命中当日结果缓存则直接返回，不重算
+            only_cache = bool(data.get("only_cache"))  # 只读缓存：无当日缓存则返回空，不联网/不重算
             _CANCEL.clear()  # 新一次分析复位取消标志
             try:
                 eng = get_engine()
@@ -972,6 +977,20 @@ class Handler(BaseHTTPRequestHandler):
                         400,
                         {"ok": False, "error": f"{as_of} 闭市或非交易日（库中无当日行情），本次不分析"},
                     )
+                    return
+                if only_cache:
+                    # 只获取缓存：命中返回缓存；未命中返回空，不联网获取
+                    cached = _load_analysis_cache(as_of)
+                    if cached is not None:
+                        self._send(200, {
+                            "ok": True, "date": as_of, "from_cache": True, **cached,
+                        })
+                    else:
+                        self._send(200, {
+                            "ok": True, "date": as_of, "from_cache": False,
+                            "only_cache_empty": True,
+                            "results": {}, "names": {}, "futures": {},
+                        })
                     return
                 if use_cache:
                     cached = _load_analysis_cache(as_of)
@@ -1094,6 +1113,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(400, {"error": "需要非空 codes 列表"})
                 return
             as_of = (data.get("as_of") or "").strip() or None
+            only_cache = bool(data.get("only_cache"))  # 只读缓存：未命中的项不联网，直接跳过
             name_map = get_engine().get_symbol_names()
 
             # 建立长响应（流式 NDJSON），设置输出头后逐行写入
@@ -1125,7 +1145,14 @@ class Handler(BaseHTTPRequestHandler):
                     for kd in STOCK_KINDS:
                         kind = kd["key"]
                         try:
-                            r, from_cache = query_stock_data(code, kind, as_of)  # 内存→SQLite→baostock，命中即复用缓存
+                            # 内存→SQLite→baostock，命中即复用缓存；only_cache 时未命中不联网
+                            r, from_cache = query_stock_data(code, kind, as_of, only_cache=only_cache)
+                            if r is None:
+                                # 仅缓存模式未命中：不联网获取，跳过该条
+                                fail += 1
+                                emit({"type": "item", "idx": si, "code": code, "name": nm,
+                                      "title": kd["title"], "ok": False, "error": "无缓存（仅缓存模式，未联网获取）"})
+                                continue
                             buf[code][kind] = r
                             ok += 1
                             emit({"type": "item", "idx": si, "code": code, "name": nm,

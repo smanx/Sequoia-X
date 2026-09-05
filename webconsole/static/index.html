@@ -261,6 +261,9 @@
       <button class="btn-primary" id="btnAnalyze">开始分析</button>
       <button class="btn-primary" id="btnPrevDay">← 上一个工作日</button>
       <button class="btn-primary" id="btnNextDay">下一个工作日 →</button>
+      <label class="check" id="onlyCacheWrap" title="勾选后：开始分析 / 获取本列表全部数据 均只读取已有缓存，命中则返回缓存，未命中则返回空，不再联网获取">
+        <input type="checkbox" id="onlyCache"> 只获取缓存的数据
+      </label>
       <div class="field" style="margin-left:auto">
         <label>线程模式</label>
         <select id="modeSel" class="sel">
@@ -637,16 +640,17 @@ async function openBatch(key, reopen=false){
   $('batchDone').style.display='none';
   const log=$('batchLog'); log.innerHTML='';
   $('batchStatus').innerHTML='';
-  $('batchTitle').textContent=`批量获取：${codes.length} 只股票 × ${BATCH_KINDS.length} 项数据（长接口·自动缓存）`;
+  const onlyCache=!!$('onlyCache') && $('onlyCache').checked;
+  $('batchTitle').textContent=`批量获取：${codes.length} 只股票 × ${BATCH_KINDS.length} 项数据（长接口·自动缓存${onlyCache?'·仅缓存':''}）`;
   batchData={};
   batchRunning=true;
   refreshReopen();  // 正在获取中即可重新打开
-  batchLog(log,`开始获取 ${codes.length} 只股票…`);
+  batchLog(log,`开始获取 ${codes.length} 只股票…${onlyCache?'（仅缓存模式：未命中的项不联网，返回空）':''}`);
   let cur=null;  // 当前正在渲染的一行（用于续写状态）
   const lineOf={};
   try{
     await jstream('/api/stock/batch',
-      {codes, as_of:lastAsOf||''},
+      {codes, as_of:lastAsOf||'', only_cache:onlyCache},
       (m)=>{  // 流式回调：保持日志不变，逐项把结果写回对应行
         if(m.type==='start'){ cur=null; return; }
         if(m.type==='item'){
@@ -857,9 +861,17 @@ async function runAnalyze(){
   const t0=Date.now();
   try{
     const useCache=!!$('useCacheWrap') && $('useCache').checked;
-    const r=await jpost('/api/analyze',{date:d, mode:$('modeSel').value, use_cache:useCache});
+    const onlyCache=!!$('onlyCache') && $('onlyCache').checked;
+    const r=await jpost('/api/analyze',{date:d, mode:$('modeSel').value, use_cache:useCache, only_cache:onlyCache});
     if(!r.ok){
       setStatus(r.canceled?`<span class="warn">分析已取消</span>`:`<span class="err">分析失败：${r.error||'未知'}</span>`);
+      return r;
+    }
+    if(r.only_cache_empty){
+      // 仅缓存模式：无当日结果缓存，返回空（未联网获取）
+      setStatus(`<span class="warn">仅缓存模式：${d} 无结果缓存，返回空（未联网获取）</span>`);
+      lastAsOf=d;
+      renderTabs(keys, {}, {}, {});
       return r;
     }
     const sec=((Date.now()-t0)/1000).toFixed(1);

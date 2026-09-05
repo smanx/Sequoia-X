@@ -67,7 +67,7 @@ def pick_target_date(eng) -> str:
 
 def main() -> int:
     # 复用 webconsole 的引擎 / 分析 / 个股查询 / 明细种类定义
-    from app import STOCK_KINDS, analyze_day, get_engine, query_stock_data
+    from app import STOCK_KINDS, _bs_code, analyze_day, get_engine, query_stock_data
 
     import argparse
 
@@ -129,10 +129,12 @@ def main() -> int:
         total_for_date = conn_cache.execute(
             "SELECT COUNT(*) FROM stock_cache WHERE asof=?", (target,)
         ).fetchone()[0]
-        ph = ",".join("?" * len(codes))
+        # 缓存里存储的是 baostock code（如 sh.000017），命中股票需统一转成同格式再比对
+        bscodes = [_bs_code(c) for c in codes]
+        ph = ",".join("?" * len(bscodes))
         hit_with_cache = conn_cache.execute(
             f"SELECT COUNT (DISTINCT code) FROM stock_cache WHERE asof=? AND code IN ({ph})",
-            [target, *codes],
+            [target, *bscodes],
         ).fetchone()[0]
         conn_cache.close()
         print(f"[auto-cache] 当日本地缓存记录数（asof={target}）：{total_for_date} 条")
@@ -151,9 +153,11 @@ def main() -> int:
                 print(f"[auto-cache] 已达时间预算（{budget:.0f}s），停止获取，保留已保存数据")
                 break
             try:
-                query_stock_data(code, kind, target)  # 命中缓存则不重查；查询结果实时写 stock_cache.db
+                # 命中缓存则不重查；查询结果实时写 stock_cache.db
+                _, from_cache = query_stock_data(code, kind, target)
                 total_ok += 1
-                print(f"[auto-cache] [{i}/{len(codes)}] {code} -> {kind_node['title']} 成功")
+                src = "命中缓存" if from_cache else "在线获取"
+                print(f"[auto-cache] [{i}/{len(codes)}] {code} -> {kind_node['title']} 成功（{src}）")
             except Exception as exc:  # noqa: BLE001  (单类失败不影响其它，记录后继续)
                 total_fail += 1
                 print(f"[auto-cache] [{i}/{len(codes)}] {code} -> {kind_node['title']} 失败：{exc}")
