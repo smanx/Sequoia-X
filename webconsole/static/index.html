@@ -893,6 +893,7 @@ async function shiftDay(dir){
   if(!d){ setStatus('<span class="err">请先选择日期</span>'); return; }
   const keys=[...document.querySelectorAll('#strategyChecks input:checked')].map(c=>c.dataset.key);
   if(!keys.length){ setStatus('<span class="err">请至少勾选一个策略</span>'); return; }
+  const onlyCache=!!$('onlyCache') && $('onlyCache').checked;
   $('btnAnalyze').disabled=true;$('btnPrevDay').disabled=true;$('btnNextDay').disabled=true;
   let skipped=0;
   const release=()=>{$('btnAnalyze').disabled=false;$('btnPrevDay').disabled=false;$('btnNextDay').disabled=false;};
@@ -904,7 +905,7 @@ async function shiftDay(dir){
     setStatus(`<span class="spin"></span>正在分析 ${d} ...`);
     const t0=Date.now();
     let r;
-    try{ r=await jpost('/api/analyze',{date:d, mode:$('modeSel').value}); }
+    try{ r=await jpost('/api/analyze',{date:d, mode:$('modeSel').value, only_cache:onlyCache}); }
     catch(e){ release(); setStatus(`<span class="err">请求失败：${e.message}</span>`); return; }
     // 无数据：闭市/非交易日（ok:false 且提示该类型）或 ok:true 但分析条数为 0，都应视为"该日无数据"，继续跳
     const isNoData = !r.ok && /闭市|非交易日|无当日行情|无数据/i.test(r.error||'');
@@ -914,12 +915,13 @@ async function shiftDay(dir){
     if(r.ok && dayHasData(r)){  // 跳到有数据的交易日，渲染并停
       if(skipped>0) setStatus(`<span class="warn">跳过 ${skipped} 个无数据日 → </span>`);
       const sec=((Date.now()-t0)/1000).toFixed(1);
-      setStatus(`<span class="ok">完成，用时 ${sec}s · ${d}</span>`);
+      setStatus(`<span class="ok">完成，用时 ${sec}s · ${d}${r.from_cache?'（来自结果缓存）':''}</span>`);
       lastAsOf=d;
       renderTabs(keys, r.results, r.names||{}, r.futures||{});
       release(); return;
     }
-    skipped++;  // 该日无数据（休市），继续往下一个工作日
+    // 仅缓存模式下该日无结果缓存（only_cache_empty），视为该日无数据，继续往下一个工作日
+    skipped++;  // 该日无数据（休市/无缓存），继续往下一个工作日
   }
   // 连续 7 天都无数据，停止并报错
   release();
