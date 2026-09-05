@@ -429,8 +429,7 @@ STOCK_KINDS_MAP = {k["key"]: k["title"] for k in STOCK_KINDS}
 _QY_MAX = 12
 _RS_LIMIT = 250
 
-# 个股数据查询的本地缓存：默认 7 天 TTL，可用环境变量 STOCK_CACHE_TTL（秒）覆盖
-_CACHE_TTL = int(os.environ.get("STOCK_CACHE_TTL", str(7 * 86400)))
+# 个股数据查询的本地缓存：缓存永久有效，不过期
 _STOCK_CACHE = None  # 惰性初始化的 StockCache 实例
 
 # baostock 单一全局会话：只登录一次复用，不每次 login/logout。
@@ -567,7 +566,7 @@ def _get_stock_cache() -> cache_mod.StockCache:
             path = ONLINE_STOCK_CACHE_PATH
         else:
             path = str((BASE_DIR.parent / "data" / "stock_cache.db").resolve())
-        _STOCK_CACHE = cache_mod.StockCache(path, ttl=_CACHE_TTL)
+        _STOCK_CACHE = cache_mod.StockCache(path)
     return _STOCK_CACHE
 
 
