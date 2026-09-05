@@ -136,6 +136,13 @@
   .future-scroll td .code,.future-scroll td .name{text-align:left}
   .future-scroll .total-row td{border-top:2px solid var(--accent);background:var(--card2);
     position:sticky;bottom:0;z-index:2}   /* 合计行悬浮固定在滚动区底部 */
+  .future-scroll thead th{position:sticky;top:0;z-index:2;
+    background:var(--card2);border-bottom:1px solid var(--border)}   /* 表头第一行悬浮固定在顶部 */
+  .stock-filter-wrap{margin-bottom:8px}
+  .stock-filter{width:100%;max-width:340px;padding:7px 11px;border-radius:8px;
+    background:#0d141c;color:var(--text);border:1px solid var(--border);font-size:12px;outline:none}
+  .stock-filter:focus{border-color:var(--accent)}
+  .stock-filter::placeholder{color:var(--muted)}
   .future-scroll .total-row td.total{font-weight:800}
   .future-scroll .total-label{font-weight:700;color:var(--accent)}
   .future-scroll .day-row td{background:var(--card2);color:var(--accent2);font-weight:700;
@@ -425,6 +432,7 @@ function renderTabs(keys,results,names,futures){
          `<span class="batch-hint">串行获取本列表 ${r.symbols.length} 只股票的完整数据</span></div>`
         :'';
       body = batchBtn + statsBlock(r.stats, names) + resultTable(r, names, futures);
+      p._data={r,names,futures,isRange:false};   // 供表格筛选复用本策略数据
     }
     p.innerHTML=`<h3>${meta.name} <span style="color:var(--muted);font-size:12px">(${r.count||0})</span></h3>`+
       (r.desc?`<div class="desc">${r.desc}</div>`:'')+body;
@@ -488,13 +496,25 @@ function fmtPct(v, solid){
     ? `<span style="color:#fff">${txt}</span>`          // 实心深背景上白字
     : `<span class="${up?'up':'down'}">${txt}</span>`;
 }
-function resultTable(r,names,futures){
-  if(!r.symbols || !r.symbols.length){ return '<div class="none">（全部不符合，见上方原因分布）</div>'; }
-  const shown=r.symbols.slice(0,100);
+// 筛选匹配：按代码/名称，支持多个关键词（空格/逗号/分号分隔），任一命中即保留该行
+function filterMatches(q,code,name){
+  if(!q||!q.trim()) return true;
+  const parts=q.trim().split(/[\s,，;；]+/).filter(Boolean);
+  if(!parts.length) return true;
+  const c=String(code||'').toLowerCase(), n=String(name||'').toLowerCase();
+  return parts.some(p=>p && (c.includes(p.toLowerCase())||n.includes(p.toLowerCase())));
+}
+function buildFutureBody(r,names,futures,q){
+  const all=(r&&r.symbols)||[];
+  if(!all.length){ return '<div class="none">（全部不符合，见上方原因分布）</div>'; }
+  const filtering=!!(q&&q.trim());
+  const filtered=filtering ? all.slice().filter(s=>filterMatches(q,s,(names&&names[s])||'')) : all;
+  const shown=filtering ? filtered.slice(0,500) : filtered.slice(0,100);
+  const sumRows=filtering ? filtered : shown;   // 合计只统计筛选/展示出来的数据
   // 叠加合计：对展示的每行，把同列涨跌代数求和（"数据不足"不参与）
   const sum={}, hasSum={};
-  for(const s of shown){
-    const fut=futures&&futures[s]||{};
+  for(const s of sumRows){
+    const fut=(futures&&futures[s])||{};
     for(const node of FUTURE_NODES){
       const v=fut[node];
       if(v!==null&&v!==undefined&&!isNaN(v)){
@@ -509,23 +529,34 @@ function resultTable(r,names,futures){
       : `<td class="total"><span class="na">—</span></td>`).join('');
   const totalRow=anySum?`<tr class="total-row"><td class="code total-label">合计</td><td class="name"></td>${totalCells}</tr>`:'';
   const rows=shown.map(s=>{
-    const nm=names[s]||'';
-    const fut=futures&&futures[s]||{};
+    const nm=names&&names[s]||'';
+    const fut=(futures&&futures[s])||{};
     const cells=FUTURE_NODES.map(node=>`<td style="${cellStyle(fut[node])}">${fmtPct(fut[node])}</td>`).join('');
     return `<tr><td class="code"><a target="_blank" href="/stock.html?code=${s}&name=${encodeURIComponent(nm)}&as_of=${encodeURIComponent(lastAsOf)}" class="stock-link">${s}</a></td><td class="name">${nm||'—'}</td>${cells}</tr>`;
   }).join('');
+  const empty=rows?'':`<tr><td colspan="${FUTURE_NODES.length+2}" class="none">（无匹配结果）</td></tr>`;
   const heads=FUTURE_NODES.map(node=>`<th>${node}</th>`).join('');
-  return `<div class="scroll future-scroll"><table><thead><tr><th style="width:92px">代码</th><th>股票名称</th>${heads}</tr></thead><tbody>${rows}${totalRow}</tbody></table></div>`+
-    (r.symbols.length>100?`<div class="overflow">……共 ${r.symbols.length} 只，仅展示前 100 只</div>`:'');
+  const note=filtered.length>500
+    ?`<div class="overflow">……${filtering?'共匹配':'共'} ${filtered.length} 只，仅展示前 ${shown.length} 只</div>`
+    :(filtering?`<div class="overflow">共匹配 ${filtered.length} 只</div>` : (all.length>100?`<div class="overflow">……共 ${all.length} 只，仅展示前 100 只</div>`:''));
+  return `<div class="scroll future-scroll"><table><thead><tr><th style="width:92px">代码</th><th>股票名称</th>${heads}</tr></thead><tbody>${empty}${rows}${totalRow}</tbody></table></div>`+note;
+}
+function resultTable(r,names,futures){
+  return `<div class="stock-filter-wrap"><input class="stock-filter" placeholder="筛选：按代码或名称，多个用空格/逗号分隔"></div>`+
+    `<div class="future-body">${buildFutureBody(r,names,futures,'')}</div>`;
 }
 
 // ── 范围分析：逐日综合结果，表格按交易日分组，行首显示日期，合计行置顶 ──
-function rangeTable(r,names,futures){
-  const days=r.days||[];
-  let sum={}, hasSum={};
+function buildRangeBody(r,names,futures,q){
+  const days=(r&&r.days)||[];
+  const filtering=!!(q&&q.trim());
+  let sum={}, hasSum={}, rowsHtml='';
   for(const day of days){
-    for(const s of day.symbols){
-      const fut=(futures&&futures[s]&&futures[s][day.date])||{};
+    const date=day.date;
+    const syms=filtering? day.symbols.filter(s=>filterMatches(q,s,(names&&names[s])||'')) : day.symbols;
+    const sumSyms=filtering? syms : day.symbols;   // 合计只统计筛选/展示出来的数据
+    for(const s of sumSyms){
+      const fut=(futures&&futures[s]&&futures[s][date])||{};
       for(const node of FUTURE_NODES){
         const v=fut[node];
         if(v!==null&&v!==undefined&&!isNaN(v)){
@@ -533,27 +564,31 @@ function rangeTable(r,names,futures){
         }
       }
     }
+    if(!syms.length) continue;
+    // 交易日分组标题行
+    rowsHtml+=`<tr class="day-row"><td colspan="${FUTURE_NODES.length+3}">📅 ${date}　命中 ${syms.length} 只</td></tr>`;
+    for(const s of syms){
+      const nm=names&&names[s]||'';
+      const fut=(futures&&futures[s]&&futures[s][date])||{};
+      const cells=FUTURE_NODES.map(node=>`<td style="${cellStyle(fut[node])}">${fmtPct(fut[node])}</td>`).join('');
+      rowsHtml+=`<tr><td class="date">${date}</td><td class="code"><a target="_blank" href="/stock.html?code=${s}&name=${encodeURIComponent(nm)}&as_of=${encodeURIComponent(date)}" class="stock-link">${s}</a></td><td class="name">${nm||'—'}</td>${cells}</tr>`;
+    }
+  }
+  if(!rowsHtml){
+    return filtering? '<div class="none">（无匹配结果）</div>' : '<div class="none">（范围内本策略无任何命中）</div>';
   }
   const totalCells=FUTURE_NODES.map(node=>
     hasSum[node]
       ? `<td class="total" style="${cellStyle(sum[node], true)}">${fmtPct(sum[node], true)}</td>`
       : `<td class="total"><span class="na">—</span></td>`).join('');
   // 合计行放在表格最底部，并用 sticky 固定在滚动区底部（滚动时始终可见）
-  const allRows=[];
-  for(const day of days){
-    const date=day.date;
-    // 交易日分组标题行
-    allRows.push(`<tr class="day-row"><td colspan="${FUTURE_NODES.length+3}">📅 ${date}　命中 ${day.count} 只</td></tr>`);
-    for(const s of day.symbols){
-      const nm=names[s]||'';
-      const fut=(futures&&futures[s]&&futures[s][date])||{};
-      const cells=FUTURE_NODES.map(node=>`<td style="${cellStyle(fut[node])}">${fmtPct(fut[node])}</td>`).join('');
-      allRows.push(`<tr><td class="date">${date}</td><td class="code"><a target="_blank" href="/stock.html?code=${s}&name=${encodeURIComponent(nm)}&as_of=${encodeURIComponent(date)}" class="stock-link">${s}</a></td><td class="name">${nm||'—'}</td>${cells}</tr>`);
-    }
-  }
-  allRows.push(`<tr class="total-row"><td class="date"></td><td class="code total-label">合计</td><td class="name"></td>${totalCells}</tr>`);
+  rowsHtml+=`<tr class="total-row"><td class="date"></td><td class="code total-label">合计</td><td class="name"></td>${totalCells}</tr>`;
   const heads=FUTURE_NODES.map(node=>`<th>${node}</th>`).join('');
-  return `<div class="scroll future-scroll"><table><thead><tr><th style="width:92px">日期</th><th style="width:92px">代码</th><th>股票名称</th>${heads}</tr></thead><tbody>${allRows.join('')}</tbody></table></div>`;
+  return `<div class="scroll future-scroll"><table><thead><tr><th style="width:92px">日期</th><th style="width:92px">代码</th><th>股票名称</th>${heads}</tr></thead><tbody>${rowsHtml}</tbody></table></div>`;
+}
+function rangeTable(r,names,futures){
+  return `<div class="stock-filter-wrap"><input class="stock-filter" placeholder="筛选：按代码或名称，多个用空格/逗号分隔"></div>`+
+    `<div class="future-body">${buildRangeBody(r,names,futures,'')}</div>`;
 }
 function renderRangeTabs(keys,results,names,futures,tradeDays,start,end){
   futures=futures||{};
@@ -566,6 +601,7 @@ function renderRangeTabs(keys,results,names,futures,tradeDays,start,end){
   for(const k of keys){
     const r=results[k]||{}; const meta=STRAT_FALLBACK[k]||{name:k};
     const p=document.createElement('div'); p.className='panel'; p.id='panel-'+k;
+    p._data={r,names,futures,isRange:true};    // 供表格筛选复用本策略数据
     let body;
     if(r.error){ body=`<div class="none err">运行出错：${r.error}</div>`; }
     else{
@@ -755,6 +791,18 @@ $('btnBatchClose').onclick=()=>{ $('batchCard').style.display='none'; };
 $('btnBatchDownload').onclick=downloadBatch;
 $('btnBatchDownloadText').onclick=downloadBatchText;
 $('btnBatchCopy').onclick=copyBatch;
+
+// 表格筛选：输入时仅重渲染所在面板的表格主体（按代码/名称实时过滤，合计随之只统计筛选数据）
+document.addEventListener('input',(e)=>{
+  const inp=e.target.closest('.stock-filter');
+  if(!inp) return;
+  const panel=inp.closest('.panel');
+  if(!panel||!panel._data) return;
+  const {r,names,futures,isRange}=panel._data;
+  const bodyEl=panel.querySelector('.future-body');
+  if(!bodyEl) return;
+  bodyEl.innerHTML=isRange? buildRangeBody(r,names,futures,inp.value) : buildFutureBody(r,names,futures,inp.value);
+});
 
 // ── 日期弹框选择器（点击 .dp 弹出月历，快速选年月日）──
 let calFor=null, calY=0, calM=0;
