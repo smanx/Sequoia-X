@@ -934,10 +934,11 @@ async function runRange(){
   if(!keys.length){ setStatus('<span class="err">请至少勾选一个策略</span>'); return null; }
   $('btnRange').disabled=true;
   $('stopWrap').style.display='';
-  setStatus(`<span class="spin"></span>正在逐日分析 ${start} ~ ${end}（休市日自动跳过），请稍候...`);
+  const onlyCache=!!$('onlyCache') && $('onlyCache').checked;
+  setStatus(`<span class="spin"></span>正在逐日分析 ${start} ~ ${end}（休市日自动跳过）${onlyCache?`（仅缓存，未命中日期跳过，不联网/不重算）`:''}，请稍候...`);
   const t0=Date.now();
   try{
-    const r=await jpost('/api/analyze_range',{start,end,strategies:keys, mode:$('modeSel').value});
+    const r=await jpost('/api/analyze_range',{start,end,strategies:keys, mode:$('modeSel').value, only_cache:onlyCache});
     if(!r.ok){
       setStatus(r.canceled?`<span class="warn">范围分析已取消</span>`:`<span class="err">范围分析失败：${r.error||'未知'}</span>`);
       return r;

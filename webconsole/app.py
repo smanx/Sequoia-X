@@ -1038,6 +1038,7 @@ class Handler(BaseHTTPRequestHandler):
             keys = data.get("strategies") or None
             if isinstance(keys, list) and not keys:
                 keys = None
+            only_cache = bool(data.get("only_cache"))  # 只读缓存：逐日读当日分析结果缓存聚合，无缓存则不重算
             _CANCEL.clear()  # 新一次分析复位取消标志
             try:
                 eng = get_engine()
@@ -1045,6 +1046,39 @@ class Handler(BaseHTTPRequestHandler):
                 trade_days = eng.trade_dates_in_range(start, end)
                 if not trade_days:
                     self._send(400, {"ok": False, "error": f"{start} ~ {end} 范围内无交易日（全部休市或无数据），本次不分析"})
+                    return
+
+                if only_cache:
+                    # 只读缓存：对每个交易日读取当日分析结果缓存（当日命中列表），
+                    # 无缓存的日直接跳过；有缓存则并入综合结果，不联网、不重算策略。
+                    results: dict = {}
+                    hit_days_by_code: dict[str, set] = {}
+                    names: dict = {}
+                    futures: dict = {}
+                    cached_days: list[str] = []
+                    for day in trade_days:
+                        check_cancel()
+                        cached = _load_analysis_cache(day)
+                        if cached is None:
+                            continue
+                        cached_days.append(day)
+                        day_results = cached.get("results") or {}
+                        if keys is not None:
+                            day_results = {k: v for k, v in day_results.items() if k in keys}
+                        _merge_day(results, hit_days_by_code, day, day_results)
+                        for c, nm in (cached.get("names") or {}).items():
+                            names.setdefault(c, nm)
+                        for c, fut in (cached.get("futures") or {}).items():
+                            futures.setdefault(c, {})[day] = fut
+                    self._send(200, {
+                        "ok": True, "start": start, "end": end,
+                        "from_cache": True,
+                        "trade_days": cached_days,
+                        "cached_days": cached_days,
+                        "results": results,
+                        "names": names,
+                        "futures": futures,
+                    })
                     return
 
                 # 预加载全表一次并计算全部指标列，随后逐日评估（向量化，毫秒级/天）
