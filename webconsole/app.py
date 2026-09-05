@@ -610,7 +610,8 @@ def _analysis_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(path, timeout=20, check_same_thread=False)
     try:
         conn.execute("PRAGMA busy_timeout=20000")
-        conn.execute("PRAGMA journal_mode=WAL")
+        # 与 StockCache 一致用非 WAL，避免服务器容器/网络盘上 -wal/-shm 不稳导致 malformed
+        conn.execute("PRAGMA journal_mode=TRUNCATE")
     except sqlite3.Error:
         pass
     conn.execute(
