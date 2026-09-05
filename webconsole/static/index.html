@@ -311,6 +311,7 @@
   <div id="batchDone" style="display:none">
     <div class="batch-done-tip">全部获取完毕，是否下载该数据或直接复制？</div>
     <button class="btn-primary" id="btnBatchDownload">下载数据（JSON）</button>
+    <button class="btn-primary" id="btnBatchDownloadText">下载复制数据</button>
     <button class="btn-primary" id="btnBatchCopy">复制数据</button>
     <span class="status" id="batchStatus"></span>
   </div>
@@ -333,6 +334,7 @@
   <div class="cal-foot"><button class="cal-today" data-act="today">回到今天</button></div>
 </div>
 
+<script src="field_help.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 let dbMin=null, dbMax=null;   // 数据库数据区间（用于切换时的边界判断）
@@ -704,6 +706,17 @@ function batchToText(){
   const codes=Object.keys(batchData); const out=[];
   out.push(`查询日期：${lastAsOf?fmtCN(lastAsOf):'最新'}`);
   out.push(`共 ${codes.length} 只股票；数据项：${BATCH_KINDS.map(k=>k.title).join('、')}`);
+  // 每类数据表的列说明只输出一次，避免每只股票重复单次
+  out.push('列说明（每类表只说明一次）：');
+  for(const kd of BATCH_KINDS){
+    // 以任意一只已获取该表数据的股票来确定字段集合（同一表结构一致）
+    const sample=(batchData&&Object.keys(batchData).map(c=>batchData[c]&&batchData[c][kd.key]).filter(Boolean))[0];
+    const fh=FIELD_HELP?FIELD_HELP[kd.key]||{}:{};
+    out.push(`【${kd.title}】`);
+    const flds = sample && sample.fields ? sample.fields : [];
+    if(flds.length){ flds.forEach(f=>out.push(`  列 ${f}：${fh[f]||'(暂无说明)'}`)); }
+    else out.push('  （未获取到该数据）');
+  }
   for(const code of codes){
     const nm=(lastNames&&lastNames[code])||'';
     out.push(''); out.push(`股票代码：${code}   股票名称：${nm}`);
@@ -711,15 +724,14 @@ function batchToText(){
       const d=batchData[code]&&batchData[code][kd.key];
       if(!d || !d.fields){ out.push(`【${kd.title}】（未获取到）`); continue; }
       out.push(`【${kd.title}】`);
-      d.fields.forEach(f=>{ const fh=FIELD_HELP_BATCH[kd.key]||{}; out.push(`  列 ${f}：${fh[f]||'(暂无说明)'}`); });
+      // 数据以表头(字段名)+行 呈现，行内不再重复说明
+      out.push('  '+d.fields.join('\t'));
       if(d.rows && d.rows.length) d.rows.forEach(r=>out.push('  '+r.join('\t')));
       else out.push('  （无数据）');
     }
   }
   return out.join('\n');
 }
-// 供复制用的字段说明（仅用于文本；若未内置则显示占位）
-const FIELD_HELP_BATCH={};
 function downloadBatch(){
   const blob=new Blob([JSON.stringify(window._batchData||batchData,null,1)],{type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
@@ -736,8 +748,17 @@ async function copyBatch(){
     ta.remove();
   }
 }
+// 下载复制数据：把 batchToText() 生成的文本（含列说明与各股数据）保存为 txt
+function downloadBatchText(){
+  const text=batchToText();
+  const blob=new Blob([text],{type:'text/plain;charset=utf-8'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+  a.download=`batch_${new Date().toISOString().slice(0,10)}.txt`;
+  document.body.appendChild(a); a.click(); a.remove();
+}
 $('btnBatchClose').onclick=()=>{ $('batchCard').style.display='none'; };
 $('btnBatchDownload').onclick=downloadBatch;
+$('btnBatchDownloadText').onclick=downloadBatchText;
 $('btnBatchCopy').onclick=copyBatch;
 
 // ── 日期弹框选择器（点击 .dp 弹出月历，快速选年月日）──

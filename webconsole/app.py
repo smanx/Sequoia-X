@@ -809,6 +809,8 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_static("index.html", "text/html")
         elif path == "/stock.html":
             self._serve_static("stock.html", "text/html")
+        elif path == "/field_help.js":
+            self._serve_static("field_help.js", "application/javascript")
         elif path == "/api/info":
             try:
                 self._send(200, get_engine().get_db_info())
