@@ -654,7 +654,7 @@ async function jstream(url, body, onLine, onDone){
   onDone({});
 }
 
-let lastResults=null, lastNames={}, batchData={}, batchRunning=false, lastAsOf='';
+let lastResults=null, lastNames={}, batchData={}, batchRunning=false, lastAsOf='', lastScope={kind:'day',date:''}, _batchMeta=null;
 function batchLog(log,html,cls){ const d=document.createElement('div'); d.className=cls||''; d.innerHTML=html; log.appendChild(d); }
 async function openBatch(key, reopen=false){
   // 重新打开弹框：展示当前日志（含正在获取的实时进度）与完成区，不重新获取
@@ -669,6 +669,10 @@ async function openBatch(key, reopen=false){
   // 已有任务在跑：不再重复起一套，仅重新打开弹框看进度
   if(batchRunning){ $('batchCard').style.display='flex'; refreshReopen(); return; }
   const codes=rec.symbols;
+  // 记录本次批量下载所需命名信息：列表名、分析日期（单日或范围）、股票数量
+  const listName=(STRAT_FALLBACK&&STRAT_FALLBACK[key]&&STRAT_FALLBACK[key].name)||key||'列表';
+  const dateLabel=lastScope.kind==='range'? `${lastScope.start}~${lastScope.end}` : (lastScope.date||lastAsOf||'最新');
+  _batchMeta={listName, count:codes.length, dateLabel};
   const card=$('batchCard'); card.style.display='flex';
   $('batchDone').style.display='none';
   const log=$('batchLog'); log.innerHTML='';
@@ -735,7 +739,8 @@ function refreshReopen(){
 }
 function batchToText(){
   const codes=Object.keys(batchData); const out=[];
-  out.push(`查询日期：${lastAsOf?fmtCN(lastAsOf):'最新'}`);
+  const m=_batchMeta||{listName:'列表',count:codes.length,dateLabel:(lastAsOf||'最新')};
+  out.push(`下载列表：${m.listName}　分析日期：${m.dateLabel}　股票数量：${m.count}`);
   out.push(`共 ${codes.length} 只股票；数据项：${BATCH_KINDS.map(k=>k.title).join('、')}`);
   // 每类数据表的列说明只输出一次，避免每只股票重复单次
   out.push('列说明（每类表只说明一次）：');
@@ -763,10 +768,16 @@ function batchToText(){
   }
   return out.join('\n');
 }
+// 批量文件命名：分析日期（单日或范围）+ 列表名 + 股票数量（去除非法的文件名字符）
+function batchFileName(ext){
+  const m=_batchMeta||{listName:'列表',count:(window._batchData?Object.keys(window._batchData).length:0),dateLabel:(lastAsOf||'最新')};
+  const safe=s=>String(s||'').replace(/[\\/:*?"<>|]+/g,'_').replace(/\s+/g,'').trim();
+  return `数据_${safe(m.dateLabel)}_${safe(m.listName)}_${m.count}只.${ext}`;
+}
 function downloadBatch(){
   const blob=new Blob([JSON.stringify(window._batchData||batchData,null,1)],{type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
-  a.download=`batch_${new Date().toISOString().slice(0,10)}.json`;
+  a.download=batchFileName('json');
   document.body.appendChild(a); a.click(); a.remove();
 }
 async function copyBatch(){
@@ -784,7 +795,7 @@ function downloadBatchText(){
   const text=batchToText();
   const blob=new Blob([text],{type:'text/plain;charset=utf-8'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
-  a.download=`batch_${new Date().toISOString().slice(0,10)}.txt`;
+  a.download=batchFileName('txt');
   document.body.appendChild(a); a.click(); a.remove();
 }
 $('btnBatchClose').onclick=()=>{ $('batchCard').style.display='none'; };
@@ -905,6 +916,7 @@ $('btnAnalyze').onclick=async ()=>runAnalyze();
 async function runAnalyze(){
   const d=$('analyzeDate').value;
   if(!d){ setStatus('<span class="err">请先选择日期</span>'); return null; }
+  lastScope={kind:'day',date:d};   // 记录分析范围，供批量下载命名（单日）
   const keys=[...document.querySelectorAll('#strategyChecks input:checked')].map(c=>c.dataset.key);
   if(!keys.length){ setStatus('<span class="err">请至少勾选一个策略</span>'); return null; }
   $('btnAnalyze').disabled=true;
@@ -982,6 +994,7 @@ $('btnRange').onclick=async ()=>runRange();
 async function runRange(){
   const start=$('rangeAnaStart').value,end=$('rangeAnaEnd').value;
   if(!start||!end){ setStatus('<span class="err">请先选择范围起止日期</span>'); return null; }
+  lastScope={kind:'range',start,end};   // 记录分析范围，供批量下载命名（范围）
   const keys=[...document.querySelectorAll('#strategyChecks input:checked')].map(c=>c.dataset.key);
   if(!keys.length){ setStatus('<span class="err">请至少勾选一个策略</span>'); return null; }
   $('btnRange').disabled=true;
