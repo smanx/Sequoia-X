@@ -968,7 +968,6 @@ class Handler(BaseHTTPRequestHandler):
             if not as_of:
                 self._send(400, {"error": "需要 date"})
                 return
-            use_cache = bool(data.get("use_cache"))  # 勾选缓存：命中当日结果缓存则直接返回，不重算
             only_cache = bool(data.get("only_cache"))  # 只读缓存：无当日缓存则返回空，不联网/不重算
             _CANCEL.clear()  # 新一次分析复位取消标志
             try:
@@ -980,27 +979,21 @@ class Handler(BaseHTTPRequestHandler):
                         {"ok": False, "error": f"{as_of} 闭市或非交易日（库中无当日行情），本次不分析"},
                     )
                     return
-                if only_cache:
-                    # 只获取缓存：命中返回缓存；未命中返回空，不联网获取
-                    cached = _load_analysis_cache(as_of)
-                    if cached is not None:
-                        self._send(200, {
-                            "ok": True, "date": as_of, "from_cache": True, **cached,
-                        })
-                    else:
-                        self._send(200, {
-                            "ok": True, "date": as_of, "from_cache": False,
-                            "only_cache_empty": True,
-                            "results": {}, "names": {}, "futures": {},
-                        })
+                # 自动缓存：优先读当日结果缓存，命中直接返回；仅缓存模式下未命中才返回空，
+                # 否则（无缓存）才真正分析。
+                cached = _load_analysis_cache(as_of)
+                if cached is not None:
+                    self._send(200, {
+                        "ok": True, "date": as_of, "from_cache": True, **cached,
+                    })
                     return
-                if use_cache:
-                    cached = _load_analysis_cache(as_of)
-                    if cached is not None:
-                        self._send(200, {
-                            "ok": True, "date": as_of, "from_cache": True, **cached,
-                        })
-                        return
+                if only_cache:
+                    self._send(200, {
+                        "ok": True, "date": as_of, "from_cache": False,
+                        "only_cache_empty": True,
+                        "results": {}, "names": {}, "futures": {},
+                    })
+                    return
                 results, all_codes = analyze_day(as_of)
                 # 聚合所有命中股票的未来节点收益，供前端列表展示（多线程模式逐股票并行）
                 all_codes = sorted(all_codes)
@@ -1083,54 +1076,85 @@ class Handler(BaseHTTPRequestHandler):
                     })
                     return
 
-                # 预加载全表一次并计算全部指标列，随后逐日评估（向量化，毫秒级/天）
+                # 自动缓存：逐交易日优先读当日分析结果缓存，只有无缓存的日期才真正分析。
+                # 预加载全表一次并计算全部指标列，随后只对缺失日期逐日评估（向量化，毫秒级/天）
                 full_df = eng.get_ohlcv_all()
                 ind_df = strategies_mod.prepare(full_df)
 
-                # 逐日跑选中策略，综合收集：
-                # 多线程模式按天并行（只读共享 ind_df，线程安全），单线程模式逐日串行
                 results: dict = {}
                 hit_days_by_code: dict[str, set] = {}
+                used_cache_days: list[str] = []
+                missing_days: list[str] = []
 
+                for day in trade_days:
+                    check_cancel()
+                    cached = _load_analysis_cache(day)
+                    if cached is not None:
+                        used_cache_days.append(day)
+                        day_results = cached.get("results") or {}
+                        if keys is not None:
+                            day_results = {k: v for k, v in day_results.items() if k in keys}
+                        _merge_day(results, hit_days_by_code, day, day_results)
+                    else:
+                        missing_days.append(day)
+
+                # 只对无缓存的日期真正运行策略评估：
+                # 多线程模式按天并行（只读共享 ind_df，线程安全），单线程模式逐日串行
                 def _eval(day: str) -> dict:
                     return strategies_mod.evaluate_day(ind_df, day, keys)
 
-                if _THREAD_MODE == "multi":
-                    with ThreadPoolExecutor(max_workers=_DAY_WORKERS) as ex:
-                        for day, day_results in zip(
-                            trade_days,
-                            ex.map(_eval, trade_days),
-                        ):
-                            check_cancel()  # 每天完成后检查取消
+                if missing_days:
+                    if _THREAD_MODE == "multi":
+                        with ThreadPoolExecutor(max_workers=_DAY_WORKERS) as ex:
+                            for day, day_results in zip(
+                                missing_days,
+                                ex.map(_eval, missing_days),
+                            ):
+                                check_cancel()  # 每天完成后检查取消
+                                _merge_day(results, hit_days_by_code, day, day_results)
+                    else:
+                        for day in missing_days:
+                            check_cancel()  # 每天开始前检查取消
+                            day_results = strategies_mod.evaluate_day(ind_df, day, keys)
                             _merge_day(results, hit_days_by_code, day, day_results)
-                else:
-                    for day in trade_days:
-                        check_cancel()  # 每天开始前检查取消
-                        day_results = strategies_mod.evaluate_day(ind_df, day, keys)
-                        _merge_day(results, hit_days_by_code, day, day_results)
 
-                # 未来节点收益：按股票一次性批量计算（每只股票覆盖其所有命中日）
+                # 未来节点收益：
+                #  - 缓存命中日：直接取缓存里的 future_returns(code, as_of)（单日，按 as_of 组织）
+                #  - 真正计算日：按股票一次性批量计算 future_returns_for_dates
                 all_codes = sorted(hit_days_by_code)
                 futures: dict = {}
+                for day in used_cache_days:
+                    cached = _load_analysis_cache(day)
+                    for c, fut in (cached.get("futures") or {}).items():
+                        futures.setdefault(c, {})[day] = fut
+                comp_dates_by_code: dict[str, list[str]] = {}
+                for day in missing_days:
+                    for code in hit_days_by_code:
+                        if day in hit_days_by_code[code]:
+                            comp_dates_by_code.setdefault(code, []).append(day)
+                comp_codes = [c for c in all_codes if c in comp_dates_by_code]
                 if _THREAD_MODE == "multi":
                     with ThreadPoolExecutor(max_workers=_FUT_WORKERS) as ex:
                         for code, fut in zip(
-                            all_codes,
-                            ex.map(
-                                lambda c: eng.future_returns_for_dates(c, sorted(hit_days_by_code[c])),
-                                all_codes,
-                            ),
+                            comp_codes,
+                            ex.map(lambda c: eng.future_returns_for_dates(c, sorted(comp_dates_by_code[c])),
+                                   comp_codes),
                         ):
                             check_cancel()  # 每只股票计算前检查取消
-                            futures[code] = fut
+                            for d, v in fut.items():
+                                futures.setdefault(code, {})[d] = v
                 else:
-                    for code in all_codes:
+                    for code in comp_codes:
                         check_cancel()
-                        futures[code] = eng.future_returns_for_dates(code, sorted(hit_days_by_code[code]))
+                        for d, v in eng.future_returns_for_dates(code, sorted(comp_dates_by_code[code])).items():
+                            futures.setdefault(code, {})[d] = v
 
                 names = eng.get_symbol_names()
                 self._send(200, {
                     "ok": True, "start": start, "end": end,
+                    "from_cache": bool(used_cache_days),
+                    "cached_days": used_cache_days,
+                    "computed_days": missing_days,
                     "trade_days": trade_days,
                     "results": results,
                     "names": {c: names.get(c, "") for c in all_codes},
