@@ -58,15 +58,12 @@ jobs:
           pip install uv
           uv sync --frozen
 
-      - name: 回填模式拉取数据（python main.py --backfill）
+      - name: 回填模式拉取数据（webconsole/backfill.py，含交易日历预检查）
         # 最多跑 350 分钟：到点由 GitHub 主动停止该步骤进程树，
         # continue-on-error 让后续压缩/推送步骤照常执行（上传已有的、可能是部分的数据）
         timeout-minutes: 350
         continue-on-error: true
-        env:
-          # 备用占位，避免缺少 secret 时配置校验失败；如需飞书推送请在仓库 Secrets 配置 FEISHU_WEBHOOK_URL
-          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL || 'https://example.invalid/dummy' }}
-        run: uv run python main.py --backfill
+        run: uv run python webconsole/backfill.py
 
       - name: 校验数据文件并分卷压缩 data 目录
         run: |
