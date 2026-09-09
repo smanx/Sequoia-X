@@ -58,17 +58,14 @@ ONLINE_CACHE_ZIP = os.path.join(ONLINE_CACHE_DIR, "master.zip")
 LOCAL_DB_PATH = engine_mod._default_db_path()
 DB_STAGING = LOCAL_DB_PATH + ".staging"
 
-# ── 在线缓存：个股数据缓存（stock_cache.db）也可从 GitHub cache 分支拉取 / 切换 ──
+# ── 在线缓存：个股数据缓存（stock_cache.db）可从 GitHub cache 分支拉取并合并到本地缓存库 ──
 ONLINE_CACHE_ZIP_URL = "https://github.com/smanx/Sequoia-X/archive/refs/heads/cache.zip"
-# 在线缓存单独落盘，避免覆盖本地缓存库
-ONLINE_STOCK_CACHE_PATH = str((BASE_DIR.parent / "data" / "stock_cache_online.db").resolve())
-# 本地默认缓存路径：获取在线缓存前先判断本地是否已有数据
+# 本地缓存库：唯一缓存库（单一库）。在线缓存获取后按"保留较新"合并入库。
 LOCAL_STOCK_CACHE_PATH = str((BASE_DIR.parent / "data" / "stock_cache.db").resolve())
-_CACHE_SOURCE = "local"  # local=本地缓存，online=在线缓存
 
-# 每日单次分析结果缓存（"每天选出来的股票列表"）写入当前缓存源库的 analysis_cache 表，
+# 每日单次分析结果缓存（"每天选出来的股票列表"）写入本地缓存库的 analysis_cache 表，
 # 与 12 类个股数据共用同一缓存库文件，随 stock_cache.db 一并压缩上传 / 合并。
-# 具体路径沿用 _get_stock_cache() 的活动缓存源（local/online）。
+# 单一缓存库：始终落在 _get_stock_cache() 返回的本地缓存库。
 
 # ── Web Basic 认证：默认 admin/admin，可用环境变量 SEQUOIA_USER / SEQUOIA_PASS 修改 ──
 AUTH_USER = os.environ.get("SEQUOIA_USER", "admin")
@@ -293,25 +290,28 @@ def _extract_online_source(zip_path: str) -> str:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def fetch_online_cache(log: list | None = None) -> str:
-    """获取在线缓存：下载 cache 分支 zip -> 解 zip -> 拼接 stock_cache.tar.gz 分卷 -> 解 tar.gz -> 得 stock_cache.db。
+def fetch_online_cache(log: list | None = None) -> dict:
+    """下载 cache 分支 zip -> 解 zip -> 拼接 stock_cache.tar.gz 分卷 -> 解 tar.gz -> 得在线缓存库，
+    随后把在线缓存**合并**进本地缓存库（单一库：data/stock_cache.db）。
 
-    结果单独落盘到 ONLINE_STOCK_CACHE_PATH（不覆盖本地缓存），并自动切到在线缓存源。
+    合并不覆盖、不丢数据：把在线库的 stock_cache / analysis_cache 两张表按主键 upsert 进本地库，
+    冲突行以 updated_at 较新者取胜——本地已有且较新的缓存保持原样，在线新增/更新的补入本地。
+    整体在单个事务内完成，合并速度远快于逐条插入。
     log 传入列表时会把每个步骤的明细追加进去（供前端展示）。
-    Returns: 在线缓存 db 的落盘路径。
+    Returns: 结果 dict（rows / size / inserted / updated / skipped / log）。
     """
+    import glob as _glob
+    import shutil as _shutil
+    import tarfile as _tarfile
+    import tempfile as _tempfile
+    import zipfile as _zipfile
+
     if log is None:
         log = []
 
     def note(msg: str) -> None:
         log.append(msg)
         print(f"[online-cache] {msg}")
-
-    import glob as _glob
-    import shutil as _shutil
-    import tarfile as _tarfile
-    import tempfile as _tempfile
-    import zipfile as _zipfile
 
     tmp = _tempfile.mkdtemp(prefix="seq_cache_")
     try:
@@ -327,44 +327,132 @@ def fetch_online_cache(log: list | None = None) -> str:
 
         src_data = os.path.join(tmp, top, "data")
         parts = sorted(_glob.glob(os.path.join(src_data, "stock_cache.tar.gz.*")))
-        # 兼容无分卷的情况：单文件 tar.gz 或直接裸 db
+        db = None
         if not parts:
+            # 兼容无分卷的情况：单文件 tar.gz 或直接裸 db
             single = os.path.join(src_data, "stock_cache.tar.gz")
             direct = os.path.join(src_data, "stock_cache.db")
             if os.path.isfile(single):
                 parts = [single]
             elif os.path.isfile(direct):
-                note("数据目录为裸 stock_cache.db，直接复制到在线缓存库")
-                os.makedirs(os.path.dirname(ONLINE_STOCK_CACHE_PATH), exist_ok=True)
-                _shutil.copy(direct, ONLINE_STOCK_CACHE_PATH)
-                set_cache_source("online")
-                note(f"复制完成：{_cache_rows(ONLINE_STOCK_CACHE_PATH)} 条缓存")
-                return ONLINE_STOCK_CACHE_PATH
+                db = direct
             else:
                 raise FileNotFoundError("cache 分支未找到缓存分卷(stock_cache.tar.gz.*)")
 
-        note(f"找到 {len(parts)} 个分卷，开始拼接…")
-        tar_path = os.path.join(tmp, "stock_cache.tar.gz")
-        with open(tar_path, "wb") as out:
-            for i, p in enumerate(parts, 1):
-                with open(p, "rb") as f:
-                    _shutil.copyfileobj(f, out)
-                note(f"拼接分卷 {i}/{len(parts)}：{os.path.basename(p)}")
-        note("分卷拼接完成，解压 tar.gz…")
-        with _tarfile.open(tar_path, "r:gz") as t:
-            t.extractall(tmp)
-        db = os.path.join(tmp, "data", "stock_cache.db")
-        if not os.path.isfile(db):
-            raise FileNotFoundError("解压后未找到 stock_cache.db")
-        note("tar.gz 解压完成")
+        if db is None:
+            note(f"找到 {len(parts)} 个分卷，开始拼接…")
+            tar_path = os.path.join(tmp, "stock_cache.tar.gz")
+            with open(tar_path, "wb") as out:
+                for i, p in enumerate(parts, 1):
+                    with open(p, "rb") as f:
+                        _shutil.copyfileobj(f, out)
+                    note(f"拼接分卷 {i}/{len(parts)}：{os.path.basename(p)}")
+            note("分卷拼接完成，解压 tar.gz…")
+            with _tarfile.open(tar_path, "r:gz") as t:
+                t.extractall(tmp)
+            db = os.path.join(tmp, "data", "stock_cache.db")
+            if not os.path.isfile(db):
+                raise FileNotFoundError("解压后未找到 stock_cache.db")
+        note("tar.gz 解压完成，开始合并到本地缓存库…")
 
-        os.makedirs(os.path.dirname(ONLINE_STOCK_CACHE_PATH), exist_ok=True)
-        _shutil.copy(db, ONLINE_STOCK_CACHE_PATH)
-        set_cache_source("online")  # 获取成功后自动切到在线缓存
-        note(f"已复制到在线缓存库，共 {_cache_rows(ONLINE_STOCK_CACHE_PATH)} 条缓存")
-        return ONLINE_STOCK_CACHE_PATH
+        merged = _merge_cache_db(db)
+        note(f"合并完成：在线库 {merged['online']} 条 → 新增/更新 {merged['changed']} 条，"
+             f"跳过(本地较新) {merged['skipped']} 条；本地缓存库现共 {_cache_rows(LOCAL_STOCK_CACHE_PATH)} 条")
+        return {
+            "rows": _cache_rows(LOCAL_STOCK_CACHE_PATH),
+            "size": os.path.getsize(LOCAL_STOCK_CACHE_PATH),
+            "online": merged["online"],
+            "changed": merged["changed"],
+            "skipped": merged["skipped"],
+            "log": log,
+        }
     finally:
         _shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _merge_cache_db(online_db: str) -> dict:
+    """把在线缓存库 online_db 合并进本地缓存库（单一库）。
+
+    单事务 + ATTACH 在线库 + INSERT...SELECT...ON CONFLICT，冲突行取 updated_at 较新者，
+    避免逐条读写；返回合并统计（online=在线库总条数, changed=新增/更新的条数, skipped=本地较新跳过的条数）。
+    """
+    import sqlite3 as _sqlite3
+
+    global _STOCK_CACHE
+    # 先释放可能占用本地库连接的缓存实例，避免合并写时的锁冲突
+    if _STOCK_CACHE is not None:
+        try:
+            _STOCK_CACHE.close()
+        except Exception:  # noqa: BLE001
+            pass
+        _STOCK_CACHE = None
+
+    os.makedirs(os.path.dirname(LOCAL_STOCK_CACHE_PATH), exist_ok=True)
+    conn = _sqlite3.connect(LOCAL_STOCK_CACHE_PATH, timeout=20)
+    try:
+        conn.execute("PRAGMA busy_timeout=20000")
+        conn.execute("PRAGMA journal_mode=TRUNCATE")
+        # 确保本地库含目标表
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS stock_cache("
+            "code TEXT NOT NULL, kind TEXT NOT NULL, asof TEXT NOT NULL,"
+            " payload TEXT NOT NULL, updated_at REAL NOT NULL,"
+            " PRIMARY KEY(code, kind, asof))"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS analysis_cache("
+            "asof TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at REAL NOT NULL)"
+        )
+        conn.execute("ATTACH DATABASE ? AS src", (online_db,))
+
+        conn.execute("BEGIN")
+        try:
+            # stock_cache 中本地 updated_at 较新而被跳过的条数
+            skipped = conn.execute(
+                "SELECT COUNT(*) FROM src.stock_cache sc JOIN stock_cache d "
+                "ON d.code=sc.code AND d.kind=sc.kind AND d.asof=sc.asof "
+                "WHERE d.updated_at > sc.updated_at"
+            ).fetchone()[0] or 0
+            # analysis_cache 中本地 updated_at 较新而被跳过的条数
+            skipped += conn.execute(
+                "SELECT COUNT(*) FROM src.analysis_cache sc JOIN analysis_cache d "
+                "ON d.asof=sc.asof WHERE d.updated_at > sc.updated_at"
+            ).fetchone()[0] or 0
+
+            # 合并 stock_cache：本地无更旧(updated_at 不高于在线)者才写入，冲突时以在线值覆盖。
+            # NOT EXISTS 已滤掉"本地较新"行，故剩余行的 ON CONFLICT 更新要么持平要么在线上新，均可覆盖。
+            changed = conn.execute(
+                "INSERT INTO stock_cache(code, kind, asof, payload, updated_at) "
+                "SELECT sc.code, sc.kind, sc.asof, sc.payload, sc.updated_at "
+                "FROM src.stock_cache sc WHERE NOT EXISTS ("
+                "  SELECT 1 FROM stock_cache d "
+                "  WHERE d.code=sc.code AND d.kind=sc.kind AND d.asof=sc.asof "
+                "    AND d.updated_at > sc.updated_at) "
+                "ON CONFLICT(code, kind, asof) DO UPDATE SET "
+                "payload=excluded.payload, updated_at=excluded.updated_at"
+            ).rowcount
+            changed += conn.execute(
+                "INSERT INTO analysis_cache(asof, payload, updated_at) "
+                "SELECT sc.asof, sc.payload, sc.updated_at "
+                "FROM src.analysis_cache sc WHERE NOT EXISTS ("
+                "  SELECT 1 FROM analysis_cache d "
+                "  WHERE d.asof=sc.asof AND d.updated_at > sc.updated_at) "
+                "ON CONFLICT(asof) DO UPDATE SET "
+                "payload=excluded.payload, updated_at=excluded.updated_at"
+            ).rowcount
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+        src_rows = conn.execute(
+            "SELECT (SELECT COUNT(*) FROM src.stock_cache)"
+            "     + (SELECT COUNT(*) FROM src.analysis_cache)"
+        ).fetchone()[0] or 0
+        conn.execute("DETACH DATABASE src")
+        return {"online": src_rows, "changed": changed, "skipped": skipped}
+    finally:
+        conn.close()
 
 
 def get_strategies() -> dict:
@@ -577,31 +665,12 @@ def _query_kind(bs, bscode: str, kind: str, as_of: str | None = None) -> tuple[l
 def _get_stock_cache() -> cache_mod.StockCache:
     """惰性创建个股数据缓存（独立缓存库，不影响主行情库）。
 
-    local=本地 data/stock_cache.db，online=在线 stock_cache_online.db（从 cache 分支获取）。
+    local=本地 data/stock_cache.db（单一缓存库；在线缓存获取后合并于此，不再有在线/本地两套）。
     """
     global _STOCK_CACHE
     if _STOCK_CACHE is None:
-        if _CACHE_SOURCE == "online":
-            path = ONLINE_STOCK_CACHE_PATH
-        else:
-            path = str((BASE_DIR.parent / "data" / "stock_cache.db").resolve())
-        _STOCK_CACHE = cache_mod.StockCache(path)
+        _STOCK_CACHE = cache_mod.StockCache(str(LOCAL_STOCK_CACHE_PATH))
     return _STOCK_CACHE
-
-
-def set_cache_source(source: str | None) -> str:
-    """切换缓存源：local=本地缓存，online=在线缓存。变化时重建缓存实例（关闭旧连接）。"""
-    global _CACHE_SOURCE, _STOCK_CACHE
-    source = source if source in ("local", "online") else "local"
-    if source != _CACHE_SOURCE:
-        _CACHE_SOURCE = source
-        if _STOCK_CACHE is not None:
-            try:
-                _STOCK_CACHE.close()
-            except Exception:  # noqa: BLE001
-                pass
-            _STOCK_CACHE = None  # 下次 _get_stock_cache 按新源重建
-    return source
 
 
 def _cache_rows(path: str) -> int:
@@ -673,24 +742,9 @@ def _save_analysis_cache(as_of: str, payload: dict) -> None:
         pass
 
 
-def cache_online_ready() -> bool:
-    """在线缓存是否已获取：在线缓存文件存在且 stock_cache 表有数据。"""
-    if not os.path.exists(ONLINE_STOCK_CACHE_PATH):
-        return False
-    try:
-        conn = sqlite3.connect(ONLINE_STOCK_CACHE_PATH)
-        n = conn.execute("SELECT COUNT(*) FROM stock_cache").fetchone()[0]
-        conn.close()
-        return n > 0
-    except Exception:  # noqa: BLE001  (表不存在/损坏等一律视为未获取)
-        return False
-
-
 def get_cache_info() -> dict:
-    """返回当前缓存源的统计信息（条数、覆盖股票数），供前端展示。"""
-    path = ONLINE_STOCK_CACHE_PATH if _CACHE_SOURCE == "online" else str(
-        (BASE_DIR.parent / "data" / "stock_cache.db").resolve()
-    )
+    """返回本地缓存库的统计信息（条数、覆盖股票数），供前端展示。"""
+    path = LOCAL_STOCK_CACHE_PATH
     if not os.path.exists(path):
         return {"rows": 0, "keys": 0}
     try:
@@ -851,10 +905,10 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:  # noqa: BLE001
                 self._send(500, {"error": str(exc)})
         elif path == "/api/online-cache":
+            # 单一缓存库：无本地/在线切换，仅返回本地缓存概况
             try:
                 self._send(200, {
-                    "source": _CACHE_SOURCE,
-                    "online_ready": cache_online_ready(),
+                    "source": "local",
                     "info": get_cache_info(),
                 })
             except Exception as exc:  # noqa: BLE001
@@ -921,20 +975,9 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:  # noqa: BLE001
                 self._send(500, {"ok": False, "error": str(exc)})
 
-        elif path == "/api/online-cache":
-            # 切换缓存源：local=本地缓存，online=在线缓存
-            source = set_cache_source(data.get("source"))
-            try:
-                self._send(200, {
-                    "ok": True, "source": source, "online_ready": cache_online_ready(),
-                    "info": get_cache_info(),
-                })
-            except Exception as exc:  # noqa: BLE001
-                self._send(500, {"ok": False, "error": str(exc)})
-
         elif path == "/api/online-cache/fetch":
-            # 获取在线缓存：默认先看本地缓存，本地已有数据则跳过（避免重复下载）；
-            # 勾选 force 时可忽略本地、强制从 cache 分支下载并解压到在线缓存库。
+            # 获取在线缓存并合并到本地缓存库：
+            # 默认先看本地缓存，本地已有数据则跳过（避免重复下载）；勾选 force 时忽略本地、强制下载并合并。
             # 每一步都输出明细日志。
             try:
                 t0 = time.time()
@@ -945,20 +988,21 @@ class Handler(BaseHTTPRequestHandler):
                     log.append(f"本地缓存已有 {local_rows} 条数据，无需获取在线缓存，跳过下载")
                     print(f"[online-cache] {log[-1]}")
                     self._send(200, {
-                        "ok": True, "skipped": True, "source": _CACHE_SOURCE,
+                        "ok": True, "skipped": True, "source": "local",
                         "local_rows": local_rows, "log": log,
                     })
                     return
                 log.append(f"本地缓存{local_rows or 0} 条" +
                            ("；用户选择强制获取在线缓存" if force else "，开始获取在线缓存") +
                            f"（{LOCAL_STOCK_CACHE_PATH}）")
-                db = fetch_online_cache(log)
-                from pathlib import Path as _P
+                res = fetch_online_cache(log)
                 self._send(200, {
-                    "ok": True, "source": "online", "db": db,
-                    "size": _P(db).stat().st_size,
+                    "ok": True, "source": "local",
+                    "size": res["size"],
                     "elapsed": round(time.time() - t0, 1),
-                    "online_ready": cache_online_ready(),
+                    "online": res["online"],
+                    "changed": res["changed"],
+                    "skipped": res["skipped"],
                     "info": get_cache_info(),
                     "log": log,
                 })
