@@ -127,20 +127,22 @@ def _fill_day(eng, as_of: str, deadline: float) -> tuple[int, int, int]:
 
     total_ok = 0
     total_fail = 0
-    for code, kind in missing:
+    total_missing = len(missing)
+    for idx, (code, kind) in enumerate(missing, start=1):
         if time.time() >= deadline:
             print(f"[auto-cache] {as_of} 已达时间预算，停止补取（本次成功 {total_ok} 项）")
             break
         kind_title = STOCK_KINDS_MAP[kind]
+        pct = idx / total_missing * 100
         try:
             # 命中缓存则不重查；查询结果实时写 stock_cache.db
             _, from_cache = query_stock_data(code, kind, as_of)
             total_ok += 1
             src = "命中缓存" if from_cache else "在线获取"
-            print(f"[auto-cache] {as_of} {code} -> {kind_title} 成功（{src}）")
+            print(f"[auto-cache] {as_of} [{idx}/{total_missing} ({pct:.1f}%)] {code} -> {kind_title} 成功（{src}）")
         except Exception as exc:  # noqa: BLE001  (单类失败不影响其它，记录后继续)
             total_fail += 1
-            print(f"[auto-cache] {as_of} {code} -> {kind_title} 失败：{exc}")
+            print(f"[auto-cache] {as_of} [{idx}/{total_missing} ({pct:.1f}%)] {code} -> {kind_title} 失败：{exc}")
     print(f"[auto-cache] {as_of} 补取完成：成功 {total_ok} 项，失败 {total_fail} 项")
     return len(codes), total_ok, total_fail
 

@@ -82,7 +82,8 @@ def main() -> int:
                 continue
             any_rows = True
             new = upd = dup = 0
-            for r in rows:
+            total_rows = len(rows)
+            for idx, r in enumerate(rows, start=1):
                 key_params = [r[cols.index(c)] for c in key_cols]
                 cur = base.execute(
                     f"SELECT updated_at FROM {t} WHERE {key_where}", key_params
@@ -96,6 +97,11 @@ def main() -> int:
                     upd += 1
                 else:
                     dup += 1
+                if idx % 10000 == 0 or idx == total_rows:
+                    print(
+                        f"[merge] {t}@{src} 进度：{idx}/{total_rows} "
+                        f"({idx / total_rows * 100:.1f}%)"
+                    )
             grand[t]["new"] += new
             grand[t]["upd"] += upd
             grand[t]["dup"] += dup

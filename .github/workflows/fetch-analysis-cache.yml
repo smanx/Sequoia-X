@@ -11,7 +11,7 @@ name: Fetch Analysis Cache & Push
         default: ""
         type: string
   schedule:
-    - cron: "30 8 * * *"
+    - cron: "0 10 * * *"
 
 # 需要向 cache 分支推送代码，授予 contents 写权限
 permissions:
