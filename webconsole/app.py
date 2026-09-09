@@ -785,7 +785,7 @@ def _bs_query(bscode: str, kind: str, as_of: str | None = None) -> tuple[list, l
 
 
 def query_stock_data(code: str, kind: str, as_of: str | None = None,
-                     only_cache: bool = False) -> tuple[dict | None, bool]:
+                     only_cache: bool = False, no_cache: bool = False) -> tuple[dict | None, bool]:
     """查询个股 baostock 数据并本地缓存，返回 ({"fields": [...], "rows": [[...], ...]}, from_cache)。
 
     from_cache 标记本次结果来自缓存(True)还是在线实时获取(False)。
@@ -793,6 +793,7 @@ def query_stock_data(code: str, kind: str, as_of: str | None = None,
     为 None 时取到今天。缓存键含 as_of，不同时点数据互不覆盖。
 
     only_cache=True 时仅读取缓存：命中返回缓存；未命中返回 (None, False)，不发起在线请求。
+    no_cache=True 时忽略缓存：跳过缓存读取，强制在线拉取并把结果覆盖写回缓存。
     查询顺序：内存缓存 → SQLite 缓存 → 真实 baostock 请求（回填两层缓存）。
     """
     if kind not in STOCK_KINDS_MAP:
@@ -800,9 +801,10 @@ def query_stock_data(code: str, kind: str, as_of: str | None = None,
     bscode = _bs_code(code)
     cache = _get_stock_cache()
     as_of_key = (as_of or "").strip() or "latest"
-    cached = cache.get(bscode, kind, as_of_key)
-    if cached is not None:
-        return cached, True
+    if not no_cache:
+        cached = cache.get(bscode, kind, as_of_key)
+        if cached is not None:
+            return cached, True
     if only_cache:
         return None, False  # 仅缓存模式：未命中不联网
     fields, rows = _bs_query(bscode, kind, as_of)
@@ -1005,6 +1007,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(400, {"error": "需要 date"})
                 return
             only_cache = bool(data.get("only_cache"))  # 只读缓存：无当日缓存则返回空，不联网/不重算
+            no_cache = bool(data.get("no_cache"))      # 完全重新分析：忽略已缓存结果，强制重算并覆盖缓存
             _CANCEL.clear()  # 新一次分析复位取消标志
             try:
                 eng = get_engine()
@@ -1015,14 +1018,15 @@ class Handler(BaseHTTPRequestHandler):
                         {"ok": False, "error": f"{as_of} 闭市或非交易日（库中无当日行情），本次不分析"},
                     )
                     return
-                # 自动缓存：优先读当日结果缓存，命中直接返回；仅缓存模式下未命中才返回空，
-                # 否则（无缓存）才真正分析。
-                cached = _load_analysis_cache(as_of)
-                if cached is not None:
-                    self._send(200, {
-                        "ok": True, "date": as_of, "from_cache": True, **cached,
-                    })
-                    return
+                # 自动缓存：优先读当日结果缓存，命中直接返回（勾选了 no_cache 则忽略缓存强制重算）；
+                # 仅缓存模式下未命中才返回空。
+                if not no_cache:
+                    cached = _load_analysis_cache(as_of)
+                    if cached is not None:
+                        self._send(200, {
+                            "ok": True, "date": as_of, "from_cache": True, **cached,
+                        })
+                        return
                 if only_cache:
                     self._send(200, {
                         "ok": True, "date": as_of, "from_cache": False,
@@ -1070,6 +1074,7 @@ class Handler(BaseHTTPRequestHandler):
             if isinstance(keys, list) and not keys:
                 keys = None
             only_cache = bool(data.get("only_cache"))  # 只读缓存：逐日读当日分析结果缓存聚合，无缓存则不重算
+            no_cache = bool(data.get("no_cache"))      # 完全重新分析：忽略已缓存结果，全部逐日强制重算
             _CANCEL.clear()  # 新一次分析复位取消标志
             try:
                 eng = get_engine()
@@ -1124,6 +1129,10 @@ class Handler(BaseHTTPRequestHandler):
 
                 for day in trade_days:
                     check_cancel()
+                    # no_cache：完全重新分析，忽略已缓存结果，全部日走真正计算
+                    if no_cache:
+                        missing_days.append(day)
+                        continue
                     cached = _load_analysis_cache(day)
                     if cached is not None:
                         used_cache_days.append(day)
@@ -1210,6 +1219,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             as_of = (data.get("as_of") or "").strip() or None
             only_cache = bool(data.get("only_cache"))  # 只读缓存：未命中的项不联网，直接跳过
+            no_cache = bool(data.get("no_cache"))      # 完全重新获取：忽略本地缓存，强制联网拉取并覆盖
             name_map = get_engine().get_symbol_names()
 
             # 建立长响应（流式 NDJSON），设置输出头后逐行写入
@@ -1241,8 +1251,10 @@ class Handler(BaseHTTPRequestHandler):
                     for kd in STOCK_KINDS:
                         kind = kd["key"]
                         try:
-                            # 内存→SQLite→baostock，命中即复用缓存；only_cache 时未命中不联网
-                            r, from_cache = query_stock_data(code, kind, as_of, only_cache=only_cache)
+                            # 内存→SQLite→baostock，命中即复用缓存；only_cache 时未命中不联网，
+                            # no_cache 时忽略缓存、强制在线拉取并覆盖缓存
+                            r, from_cache = query_stock_data(code, kind, as_of,
+                                                             only_cache=only_cache, no_cache=no_cache)
                             if r is None:
                                 # 仅缓存模式未命中：不联网获取，跳过该条
                                 fail += 1
