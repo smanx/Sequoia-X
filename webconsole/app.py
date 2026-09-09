@@ -976,25 +976,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(500, {"ok": False, "error": str(exc)})
 
         elif path == "/api/online-cache/fetch":
-            # 获取在线缓存并合并到本地缓存库：
-            # 默认先看本地缓存，本地已有数据则跳过（避免重复下载）；勾选 force 时忽略本地、强制下载并合并。
+            # 获取在线缓存并合并到本地缓存库（获取后一定合并，无"本地已有就跳过"）。
             # 每一步都输出明细日志。
             try:
                 t0 = time.time()
                 log: list = []
-                force = bool(data.get("force"))
-                local_rows = _cache_rows(LOCAL_STOCK_CACHE_PATH)
-                if not force and local_rows and local_rows > 0:
-                    log.append(f"本地缓存已有 {local_rows} 条数据，无需获取在线缓存，跳过下载")
-                    print(f"[online-cache] {log[-1]}")
-                    self._send(200, {
-                        "ok": True, "skipped": True, "source": "local",
-                        "local_rows": local_rows, "log": log,
-                    })
-                    return
-                log.append(f"本地缓存{local_rows or 0} 条" +
-                           ("；用户选择强制获取在线缓存" if force else "，开始获取在线缓存") +
-                           f"（{LOCAL_STOCK_CACHE_PATH}）")
+                log.append(f"本地缓存 {_cache_rows(LOCAL_STOCK_CACHE_PATH) or 0} 条，开始下载并合并在线缓存（{LOCAL_STOCK_CACHE_PATH}）")
                 res = fetch_online_cache(log)
                 self._send(200, {
                     "ok": True, "source": "local",
