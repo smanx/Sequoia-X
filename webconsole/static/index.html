@@ -213,17 +213,11 @@
     </div>
   </div>
 
-  <!-- 数据源切换 -->
+  <!-- 在线数据获取 -->
   <div class="card">
-    <h2><span class="step">↻</span> 数据源</h2>
+    <h2><span class="step">↻</span> 获取在线数据</h2>
     <div class="row">
-      <div class="field"><label>数据源</label>
-        <select id="dsSel" class="sel">
-          <option value="local" selected>本地数据源</option>
-          <option value="online">在线数据源</option>
-        </select>
-      </div>
-      <button class="btn-primary" id="btnDsFetch" style="display:none">获取在线数据源</button>
+      <button class="btn-primary" id="btnDsFetch">获取在线数据</button>
       <div id="dsStatus" class="hint" style="margin-top:6px;flex-basis:100%"></div>
     </div>
     <div class="row" style="margin-top:14px">
@@ -237,7 +231,7 @@
       <label class="check" id="csForceWrap" style="display:none"><input type="checkbox" id="csForce">强制获取（忽略本地已有缓存）</label>
       <div id="csStatus" class="hint" style="margin-top:6px;flex-basis:100%"></div>
     </div>
-    <div class="hint">本地数据源为当前 `data/sequoia_v2.db`；切换到在线数据源后，点"获取在线数据源"从 GitHub 下载打包的分卷数据库（`sequoia_v2.tar.gz.aa/.ab/...`）并解压到本地单独存放，不影响本地默认库。"数据缓存"同理：在线缓存从 cache 分支下载 `stock_cache.tar.gz.*` 解压到单独的在线缓存库，切换后个股数据查询会复用该预取缓存。</div>
+    <div class="hint">点击"获取在线数据"从 GitHub 下载打包的分卷数据库（`sequoia_v2.tar.gz.aa/.ab/...`）并解压；若在线数据较新（最大交易日 ≥ 本地），则合并覆盖本地数据库 `data/sequoia_v2.db`，否则保留本地。"数据缓存"同理：在线缓存从 cache 分支下载 `stock_cache.tar.gz.*` 解压到单独的在线缓存库，切换后个股数据查询会复用该预取缓存。</div>
   </div>
 
   <!-- 数据更新 -->
@@ -1043,44 +1037,29 @@ $('btnStop').onclick=async ()=>{
   try{ await jpost('/api/cancel',{}); }catch(e){}
 };
 
-// ── 数据源切换 ──
-const dsSel=$('dsSel'), btnDsFetch=$('btnDsFetch'), dsStatus=$('dsStatus');
-function syncDsBtn(){ btnDsFetch.style.display=dsSel.value==='online'?'':'none'; }
+// ── 获取在线数据 ──
+const btnDsFetch=$('btnDsFetch'), dsStatus=$('dsStatus');
 function dsMsg(html){ dsStatus.innerHTML=html; }
-let dsInfo=null;
 async function loadDs(){
+  // 单一库模式：仅展示当前本地库概况（数据区间等），无本地/在线切换
   try{
-    dsInfo=await jget('/api/datasource');
-    const now=dsInfo&&dsInfo.source||'local';
-    dsSel.value=now; syncDsBtn();
-    dsMsg(`当前：<b style="color:var(--accent2)">${now==='online'?'在线数据源':'本地数据源'}</b>`);
+    const r=await jget('/api/datasource');
+    const info=(r&&r.info)||{};
+    dsMsg(`本地库：<b style="color:var(--accent2)">${info.symbol_count||0}</b> 只股票 · `+
+      `<b style="color:var(--accent2)">${(info.row_count||0).toLocaleString()}</b> 条 K 线 · `+
+      `区间 <b style="color:var(--accent2)">${info.min_date||'–'} ~ ${info.max_date||'–'}</b>`);
   }catch(e){ dsMsg(`<span class="err">读取数据源失败：${e.message}</span>`); }
 }
-dsSel.onchange=async ()=>{
-  const selVal=dsSel.value;
-  dsSel.disabled=true;
-  try{
-    const r=await jpost('/api/datasource',{source:selVal});
-    if(r.ok){
-      dsInfo=r;
-      dsSel.value=r.source; syncDsBtn();
-      dsMsg(`已切换数据源：<b style="color:var(--accent2)">${r.source==='online'?'在线':'本地'}</b>`+
-        (r.source==='online' && !r.online_ready?'（尚未获取，请点击「获取在线数据源」）':''));
-      await refreshInfo();
-    }else dsMsg(`<span class="err">切换失败：${r.error||'未知'}</span>`);
-  }catch(e){ dsMsg(`<span class="err">切换失败：${e.message}</span>`); }
-  finally{ dsSel.disabled=false; }
-};
 btnDsFetch.onclick=async ()=>{
   btnDsFetch.disabled=true;
-  dsMsg('<span class="spin"></span>正在从 GitHub 下载并解压在线数据源（约上百 MB，请耐心等待，请勿关闭页面）...');
+  dsMsg('<span class="spin"></span>正在从 GitHub 下载并解压在线数据（约上百 MB，请耐心等待，请勿关闭页面）...');
   try{
     const r=await jpost('/api/online/fetch',{});
     if(r.ok){
-      dsInfo=r;
-      dsSel.value='online'; syncDsBtn();
-      dsMsg(`<span class="ok">获取完成：${(r.size/1048576).toFixed(1)}MB，用时 ${r.elapsed}s，当前为在线数据源</span>`);
+      dsMsg(`${r.overwrote?'<span class="ok">':'<span class="warn">'}${r.message||''}</span>`+
+        (r.size?`（${(r.size/1048576).toFixed(1)}MB，用时 ${r.elapsed}s）`:`（用时 ${r.elapsed}s）`));
       await refreshInfo();
+      await loadDs();
     }else dsMsg(r.canceled?`<span class="warn">获取已取消</span>`:`<span class="err">获取失败：${r.error||'未知'}</span>`);
   }catch(e){ dsMsg(`<span class="err">获取失败：${e.message}</span>`); }
   finally{ btnDsFetch.disabled=false; }

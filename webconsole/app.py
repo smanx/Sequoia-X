@@ -48,14 +48,15 @@ logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 
-# ── 数据源：默认本地，可切换为在线（下载 GitHub 打包的分卷数据库解压得到） ──
+# ── 在线数据获取：下载 GitHub 打包的分卷数据库解压后，按"在线较新则覆盖本地库"合并纳入单一库 ──
 ONLINE_ZIP_URL = "https://github.com/smanx/Sequoia-X/archive/refs/heads/data.zip"
-# 在线数据源落盘路径：解压出的 db 单独存放，避免覆盖本地默认库
-ONLINE_DB_PATH = str((BASE_DIR.parent / "data" / "sequoia_online_v2.db").resolve())
-# 在线数据源下载包的缓存目录：master.zip 落盘缓存，后续切换/获取直接复用，避免重复下载
+# 在线数据源下载包的缓存目录：master.zip 落盘缓存，后续获取直接复用，避免重复下载
 ONLINE_CACHE_DIR = str((BASE_DIR.parent / "data" / "online_cache").resolve())
 ONLINE_CACHE_ZIP = os.path.join(ONLINE_CACHE_DIR, "master.zip")
-_DATASOURCE = {"source": "local"}
+# 目标库：本地默认库。获取在线数据后按"在线较新则覆盖"规则合并到此处（单一库，不再区分本地/在线）。
+# 用 staging 中间文件 + 文件系统级 rename 覆盖，避免整库逐行拷贝，覆盖耗时与库大小基本无关。
+LOCAL_DB_PATH = engine_mod._default_db_path()
+DB_STAGING = LOCAL_DB_PATH + ".staging"
 
 # ── 在线缓存：个股数据缓存（stock_cache.db）也可从 GitHub cache 分支拉取 / 切换 ──
 ONLINE_CACHE_ZIP_URL = "https://github.com/smanx/Sequoia-X/archive/refs/heads/cache.zip"
@@ -144,53 +145,44 @@ def _maybe_reload() -> None:
 
 
 def get_engine():
+    """获取行情引擎，始终指向本地默认库 data/sequoia_v2.db（在线获取成功后按新旧覆盖该库）。
+    单一库模式：不再有本地/在线两套库切换。
+    """
     global _engine
     if _engine is None:
-        db_path = ONLINE_DB_PATH if _DATASOURCE["source"] == "online" else engine_mod._default_db_path()
-        _engine = engine_mod.DataEngine(db_path)
+        _engine = engine_mod.DataEngine(LOCAL_DB_PATH)
     return _engine
 
 
-def set_datasource(source: str | None) -> str:
-    """切换数据源：local=本地默认库，online=在线下载库。变化时重建引擎连接。
-
-    切到在线时：若在线库尚未就绪但已缓存下载包（data/online_cache/master.zip），
-    则直接解压缓存包得到在线库，避免重复下载。
-    """
-    global _engine
-    source = source if source in ("local", "online") else "local"
-    if source != _DATASOURCE["source"]:
-        _DATASOURCE["source"] = source
-        # 切到在线若有缓存包且在线库未就绪，自动解压复用
-        if source == "online" and not online_ready() and os.path.isfile(ONLINE_CACHE_ZIP):
-            _extract_online_source(ONLINE_CACHE_ZIP)
-        _engine = None  # 下次 get_engine 用新库重建连接
-    return source
-
-
-def online_ready() -> bool:
-    """在线数据源是否已获取：在线库文件存在且 stock_daily 表有数据。
-
-    注意：切到在线源但未获取时，get_engine 会按路径创建一个空库文件（建表），
-    因此不能仅凭文件存在判断，必须以"是否有实际行情数据"为准。
-    """
-    if not os.path.exists(ONLINE_DB_PATH):
-        return False
+def _max_trade_date(db_path: str) -> str | None:
+    """返回指定库中 stock_daily 的最大交易日期；库不存在/无数据/损坏时返回 None。"""
+    if not os.path.exists(db_path):
+        return None
     try:
-        conn = sqlite3.connect(ONLINE_DB_PATH)
-        n = conn.execute("SELECT COUNT(*) FROM stock_daily").fetchone()[0]
-        conn.close()
-        return n > 0
-    except Exception:  # noqa: BLE001  (表不存在/损坏等一律视为未获取)
-        return False
+        conn = sqlite3.connect(db_path, timeout=20.0)
+        try:
+            row = conn.execute("SELECT MAX(date) FROM stock_daily").fetchone()
+        finally:
+            conn.close()
+        return row[0] if row else None
+    except Exception:  # noqa: BLE001  (表不存在/损坏等一律视为无最大值)
+        return None
 
 
-def get_engine():
+def apply_online_to_local(online_db: str, existed_db: bool, online_date: str) -> tuple[bool, str]:
+    """把 staging 处的在线库按新旧规则覆盖到本地默认库（须已判定在线较新）。
+
+    online_db 已由 _extract_online_source 安置到本地库同目录，此处直接 os.replace
+    原子覆盖，不做逐行拷贝，覆盖耗时与库大小基本无关。
+    """
     global _engine
-    if _engine is None:
-        db_path = ONLINE_DB_PATH if _DATASOURCE["source"] == "online" else engine_mod._default_db_path()
-        _engine = engine_mod.DataEngine(db_path)
-    return _engine
+    if os.path.exists(LOCAL_DB_PATH):
+        existed_db = True
+    os.makedirs(os.path.dirname(LOCAL_DB_PATH), exist_ok=True)
+    os.replace(online_db, LOCAL_DB_PATH)
+    _engine = None  # 覆盖后强制重建连接，避免旧连接读到陈旧/损坏数据
+    return True, (f"在线数据较新（{online_date}），已覆盖本地库" +
+                  ("（新建本地库）" if not existed_db else ""))
 
 
 def _download_stream(url: str, dest: str, chunk: int = 1024 * 256) -> None:
@@ -205,25 +197,50 @@ def _download_stream(url: str, dest: str, chunk: int = 1024 * 256) -> None:
             f.write(buf)
 
 
-def fetch_online_source() -> str:
-    """获取在线数据源：优先复用本地缓存包，否则下载 -> 解压 -> 拼分卷 -> 解 tar.gz -> 得到 db。
+def fetch_online_and_apply() -> dict:
+    """下载/解压在线数据，并按"在线较新则覆盖本地库"规则合并到单一本地库。
 
     下载过的 master.zip 会缓存到 data/online_cache/，后续获取不再重复下载。
-    分卷命名参考 .github/workflows/fetch-data.yml：
-      打包: tar -czf - -C . data | split -b 90m - sequoia_v2.tar.gz.
-      解包: 拼接所有 data/sequoia_v2.tar.gz.* 分卷 → tar.gz → 解出 data/sequoia_v2.db
-    Returns: 在线数据源 db 的落盘路径。
+    分卷命名参考 .github/workflows/fetch-data.yml。
+    Returns: 结果 dict（ok / overwrote / message / size / elapsed）。
     """
-    # 已有缓存包则直接复用（解压），否则下载到缓存目录
-    if os.path.isfile(ONLINE_CACHE_ZIP):
-        return _extract_online_source(ONLINE_CACHE_ZIP)
-    os.makedirs(ONLINE_CACHE_DIR, exist_ok=True)
-    _download_stream(ONLINE_ZIP_URL, ONLINE_CACHE_ZIP)
-    return _extract_online_source(ONLINE_CACHE_ZIP)
+    import time
+
+    t0 = time.time()
+    if not os.path.isfile(ONLINE_CACHE_ZIP):
+        os.makedirs(ONLINE_CACHE_DIR, exist_ok=True)
+        _download_stream(ONLINE_ZIP_URL, ONLINE_CACHE_ZIP)
+    db = _extract_online_source(ONLINE_CACHE_ZIP)
+
+    online_date = _max_trade_date(db)
+    if online_date is None:
+        if os.path.exists(db):
+            os.remove(db)
+        return {"ok": True, "overwrote": False,
+                "message": "在线数据无行情（MAX(date) 为空），未覆盖",
+                "elapsed": round(time.time() - t0, 1)}
+
+    local_date = _max_trade_date(LOCAL_DB_PATH)
+    if local_date and local_date > online_date:
+        if os.path.exists(db):
+            os.remove(db)
+        return {"ok": True, "overwrote": False,
+                "message": f"本地数据较新（{local_date} > 在线 {online_date}），已保留本地库",
+                "elapsed": round(time.time() - t0, 1)}
+
+    existed = os.path.exists(LOCAL_DB_PATH)
+    _, msg = apply_online_to_local(db, existed, online_date)
+    return {"ok": True, "overwrote": True, "message": msg,
+            "size": os.path.getsize(LOCAL_DB_PATH),
+            "elapsed": round(time.time() - t0, 1)}
 
 
 def _extract_online_source(zip_path: str) -> str:
-    """从本地缓存的 master.zip 中解出在线数据库 db：解 zip -> 拼分卷 -> 解 tar.gz -> 取得 db。"""
+    """从本地缓存的 master.zip 中解出在线数据库，安置到 DB_STAGING（本地库同目录）。
+
+    解包路径：解 zip → 拼分卷 → 解 tar.gz → 得到 sequoia_v2.db。
+    放到本地库同目录是为让后续 os.replace 走同卷原子改名，避免跨卷整库拷贝。
+    """
     import glob
     import shutil
     import tarfile
@@ -238,6 +255,7 @@ def _extract_online_source(zip_path: str) -> str:
 
         src_data = os.path.join(tmp, top, "data")
         parts = sorted(glob.glob(os.path.join(src_data, "sequoia_v2.tar.gz.*")))
+        db = None
         if not parts:
             # 兼容无分卷的情况：单文件 tar.gz 或直接裸 db
             single = os.path.join(src_data, "sequoia_v2.tar.gz")
@@ -245,31 +263,32 @@ def _extract_online_source(zip_path: str) -> str:
             if os.path.isfile(single):
                 parts = [single]
             elif os.path.isfile(direct_db):
-                os.makedirs(os.path.dirname(ONLINE_DB_PATH), exist_ok=True)
-                shutil.copy(direct_db, ONLINE_DB_PATH)
-                return ONLINE_DB_PATH
+                db = direct_db
             else:
                 raise FileNotFoundError("在线源码包 data 目录未找到数据库分卷(sequoia_v2.tar.gz.*)")
 
-        # 拼接分卷成完整 tar.gz
-        tar_path = os.path.join(tmp, "sequoia_v2.tar.gz")
-        with open(tar_path, "wb") as out:
-            for p in parts:
-                with open(p, "rb") as f:
-                    shutil.copyfileobj(f, out)
+        if db is None:
+            # 拼接分卷成完整 tar.gz
+            tar_path = os.path.join(tmp, "sequoia_v2.tar.gz")
+            with open(tar_path, "wb") as out:
+                for p in parts:
+                    with open(p, "rb") as f:
+                        shutil.copyfileobj(f, out)
+            # 解 tar.gz（内部是相对 . 的 data/ 目录）
+            with tarfile.open(tar_path, "r:gz") as t:
+                t.extractall(tmp)
+            db = os.path.join(tmp, "data", "sequoia_v2.db")
+            if not os.path.isfile(db):
+                db = os.path.join(src_data, "sequoia_v2.db")
+            if not os.path.isfile(db):
+                raise FileNotFoundError("解压后未找到 sequoia_v2.db")
 
-        # 解 tar.gz（内部是相对 . 的 data/ 目录）
-        with tarfile.open(tar_path, "r:gz") as t:
-            t.extractall(tmp)
-        db = os.path.join(tmp, "data", "sequoia_v2.db")
-        if not os.path.isfile(db):
-            db = os.path.join(src_data, "sequoia_v2.db")
-        if not os.path.isfile(db):
-            raise FileNotFoundError("解压后未找到 sequoia_v2.db")
-
-        os.makedirs(os.path.dirname(ONLINE_DB_PATH), exist_ok=True)
-        shutil.copy(db, ONLINE_DB_PATH)
-        return ONLINE_DB_PATH
+        # 搬到本地库同目录的 staging，与本地库同卷，os.replace 原子覆盖免去整库拷贝
+        os.makedirs(os.path.dirname(DB_STAGING), exist_ok=True)
+        if os.path.exists(DB_STAGING):
+            os.remove(DB_STAGING)
+        shutil.move(db, DB_STAGING)
+        return DB_STAGING
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -823,10 +842,10 @@ class Handler(BaseHTTPRequestHandler):
             ]
             self._send(200, {"strategies": metas})
         elif path == "/api/datasource":
+            # 单一库模式：无本地/在线切换，仅返回当前本地库概况
             try:
                 self._send(200, {
-                    "source": _DATASOURCE["source"],
-                    "online_ready": online_ready(),
+                    "source": "local",
                     "info": get_engine().get_db_info(),
                 })
             except Exception as exc:  # noqa: BLE001
@@ -884,31 +903,17 @@ class Handler(BaseHTTPRequestHandler):
             _UPDATE_CANCEL.set()  # 通知正在运行的数据更新在下一个检查点终止
             self._send(200, {"ok": True, "canceled": True})
 
-        elif path == "/api/datasource":
-            # 切换数据源：local=本地默认库，online=在线下载库（允许切到在线，即使未获取
-            # 以便展示「获取在线数据源」按钮；online_ready 反映是否有实际数据）
-            source = set_datasource(data.get("source"))
-            try:
-                info = get_engine().get_db_info()
-                self._send(200, {
-                    "ok": True, "source": source, "online_ready": online_ready(),
-                    "info": info,
-                })
-            except Exception as exc:  # noqa: BLE001
-                self._send(500, {"ok": False, "error": str(exc)})
-
         elif path == "/api/online/fetch":
-            # 获取在线数据源：下载 master.zip 解压 → 拼分卷 → 解 tar.gz → 得到 db
+            # 获取在线数据：下载 master.zip 解压 → 拼分卷 → 解 tar.gz → 按"在线较新则覆盖"合并到本地库
             try:
-                t0 = time.time()
-                db = fetch_online_source()
-                set_datasource("online")  # 获取成功后自动切到在线数据源
-                info = get_engine().get_db_info()
-                from pathlib import Path as _P
+                res = fetch_online_and_apply()
+                info = get_engine().get_db_info()  # 用新库触发重建连接并校验可读
                 self._send(200, {
-                    "ok": True, "source": "online", "db": db,
-                    "size": _P(db).stat().st_size,
-                    "elapsed": round(time.time() - t0, 1),
+                    "ok": True, "source": "local",
+                    "overwrote": res["overwrote"],
+                    "message": res["message"],
+                    "size": res.get("size"),
+                    "elapsed": res["elapsed"],
                     "info": info,
                 })
             except AnalysisCanceled as exc:
