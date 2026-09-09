@@ -119,7 +119,11 @@ def backfill(
 
             bs_code = engine._to_baostock_code(symbol)
 
-            print(f"[{symbol}] 拉取 {start} ~ {latest_trade_date}（{bs_code}）")
+            pct = (i + 1) / len(symbols) * 100
+            print(
+                f"[{i + 1}/{len(symbols)} ({pct:.1f}%)] "
+                f"[{symbol}] 拉取 {start} ~ {latest_trade_date}（{bs_code}）"
+            )
 
             # 带重试的查询
             rows: list = []
