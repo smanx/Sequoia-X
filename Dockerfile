@@ -32,8 +32,10 @@ COPY . .
 VOLUME ["/app/data"]
 
 # 容器内监听 0.0.0.0（宿主机通过 -p 访问）；端口可用 SEQUOIA_PORT 覆盖
+# 在线数据源仓库（形如 owner/repo），默认 smanx/Sequoia-X，可用 SEQUOIA_REPO 覆盖
 ENV SEQUOIA_HOST=0.0.0.0 \
-    SEQUOIA_PORT=7860
+    SEQUOIA_PORT=7860 \
+    SEQUOIA_REPO=smanx/Sequoia-X
 
 EXPOSE 7860
 

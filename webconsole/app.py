@@ -49,7 +49,9 @@ BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 
 # ── 在线数据获取：下载 GitHub 打包的分卷数据库解压后，按"在线较新则覆盖本地库"合并纳入单一库 ──
-ONLINE_ZIP_URL = "https://github.com/smanx/Sequoia-X/archive/refs/heads/data.zip"
+# 数据源仓库默认为 smanx/Sequoia-X，可用环境变量 SEQUOIA_REPO（形如 "owner/repo"）覆盖
+_SEQUOIA_REPO = os.environ.get("SEQUOIA_REPO", "smanx/Sequoia-X").strip().strip("/")
+ONLINE_ZIP_URL = f"https://github.com/{_SEQUOIA_REPO}/archive/refs/heads/data.zip"
 # 在线数据源下载包的缓存目录：master.zip 落盘缓存，后续获取直接复用，避免重复下载
 ONLINE_CACHE_DIR = str((BASE_DIR.parent / "data" / "online_cache").resolve())
 ONLINE_CACHE_ZIP = os.path.join(ONLINE_CACHE_DIR, "master.zip")
@@ -59,7 +61,7 @@ LOCAL_DB_PATH = engine_mod._default_db_path()
 DB_STAGING = LOCAL_DB_PATH + ".staging"
 
 # ── 在线缓存：个股数据缓存（stock_cache.db）可从 GitHub cache 分支拉取并合并到本地缓存库 ──
-ONLINE_CACHE_ZIP_URL = "https://github.com/smanx/Sequoia-X/archive/refs/heads/cache.zip"
+ONLINE_CACHE_ZIP_URL = f"https://github.com/{_SEQUOIA_REPO}/archive/refs/heads/cache.zip"
 # 本地缓存库：唯一缓存库（单一库）。在线缓存获取后按"保留较新"合并入库。
 LOCAL_STOCK_CACHE_PATH = str((BASE_DIR.parent / "data" / "stock_cache.db").resolve())
 
