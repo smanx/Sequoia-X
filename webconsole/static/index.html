@@ -636,14 +636,18 @@ function dayHasData(r){
 // ── 列表页批量获取：一键拉取当前结果列表全部股票的完整数据（串行，实时日志）──
 // 流式读取 NDJSON 长接口：每解析到一行 JSON 就回调 onLine；结束回调 onDone
 async function jstream(url, body, onLine, onDone){
-  const r=await fetch(url,{method:'POST',
-    headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
-  if(!r.ok){ onDone({__err:r.status+' '+r.statusText}); return; }
+  let r;
+  try{ r=await fetch(url,{method:'POST',
+    headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)}); }
+  catch(e){ onDone({__err:'网络异常：'+e.message}); return; }
+  if(!r.ok){ onDone({__err:'HTTP '+r.status+' '+r.statusText}); return; }
   const reader=r.body.getReader();
   const dec=new TextDecoder();
   let acc='';
   while(true){
-    const {value,done}=await reader.read();
+    let value, done;
+    try{ ({value,done}=await reader.read()); }
+    catch(e){ onDone({__err:'读取中断：'+e.message}); return; }
     if(done) break;
     acc+=dec.decode(value,{stream:true});
     let i;
@@ -653,7 +657,7 @@ async function jstream(url, body, onLine, onDone){
       try{ onLine(JSON.parse(line)); }catch(_e){}
     }
   }
-  onDone({});
+  onDone({__ok:true});
 }
 
 let lastResults=null, lastNames={}, batchData={}, batchRunning=false, lastAsOf='', lastScope={kind:'day',date:''}, _batchMeta=null;
@@ -691,6 +695,7 @@ async function openBatch(key, reopen=false){
   batchLog(log,`开始获取 ${codes.length} 只股票…${modeDesc}`);
   let cur=null;  // 当前正在渲染的一行（用于续写状态）
   const lineOf={};
+  let sawDone=false;  // 是否收到完成信号，用于识别提前断流
   try{
     await jstream('/api/stock/batch',
       {codes, as_of:lastAsOf||'', only_cache:bm.only_cache, no_cache:bm.no_cache},
@@ -713,6 +718,7 @@ async function openBatch(key, reopen=false){
           cur=line;
         }else if(m.type==='done'){
           // 完成信号先到（只带计数）：立刻打印统计并显示完成区；数据随后经 payload 下发
+          sawDone=true;
           cur=null;
           batchLog(log,`<b>完成：共 ${m.total} 项，成功 ${m.ok}，失败 ${m.fail}</b>`);
           $('batchDone').style.display= m.ok>0 ? 'flex' : 'none';
@@ -723,7 +729,10 @@ async function openBatch(key, reopen=false){
           if(m.code) batchData[m.code]=m.data||{};
         }
       },
-      ()=>{}  // 流结束（含中断）由 finally 统一收尾
+      (end)=>{  // 流结束：暴露 HTTP/网络/中断等异常，避免静默卡住
+        if(end && end.__err) batchLog(log,`<span class="fail">流结束异常：${end.__err}</span>`);
+        else if(!sawDone) batchLog(log,`<span class="fail">请求未正常结束（未收到完成信号，可能服务未就绪/后端未重启/中途断开）</span>`);
+      }
     );
   }catch(e){
     batchLog(log,`<span class="fail">请求失败：${e.message}</span>`);
