@@ -314,9 +314,9 @@
   <div id="batchLog" class="scroll batch-log"></div>
   <div id="batchDone" style="display:none">
     <div class="batch-done-tip">全部获取完毕，是否下载该数据或直接复制？</div>
-    <button class="btn-primary" id="btnBatchDownload">下载数据（JSON）</button>
-    <button class="btn-primary" id="btnBatchDownloadText">下载复制数据</button>
-    <button class="btn-primary" id="btnBatchCopy">复制数据</button>
+    <button class="btn-primary" id="btnBatchDownload" disabled>下载数据（JSON）</button>
+    <button class="btn-primary" id="btnBatchDownloadText" disabled>下载复制数据</button>
+    <button class="btn-primary" id="btnBatchCopy" disabled>复制数据</button>
     <span class="status" id="batchStatus"></span>
   </div>
 </div>
@@ -657,6 +657,7 @@ async function jstream(url, body, onLine, onDone){
 }
 
 let lastResults=null, lastNames={}, batchData={}, batchRunning=false, lastAsOf='', lastScope={kind:'day',date:''}, _batchMeta=null;
+let _batchDataReady=false;  // 批量数据(payload)是否已从服务端收齐，收齐前禁用下载/复制
 function batchLog(log,html,cls){ const d=document.createElement('div'); d.className=cls||''; d.innerHTML=html; log.appendChild(d); }
 async function openBatch(key, reopen=false){
   // 重新打开弹框：展示当前日志（含正在获取的实时进度）与完成区，不重新获取
@@ -684,6 +685,7 @@ async function openBatch(key, reopen=false){
   const modeDesc = bm.no_cache ? '（忽略缓存，强制在线获取并覆盖）' : (bm.only_cache ? '（仅缓存：未命中的项不联网，返回空）' : '（有缓存用缓存，无缓存才在线获取）');
   $('batchTitle').textContent=`批量获取：${codes.length} 只股票 × ${BATCH_KINDS.length} 项数据（长接口·自动缓存${modeTxt}）`;
   batchData={};
+  _batchDataReady=false;
   batchRunning=true;
   refreshReopen();  // 正在获取中即可重新打开
   batchLog(log,`开始获取 ${codes.length} 只股票…${modeDesc}`);
@@ -710,10 +712,15 @@ async function openBatch(key, reopen=false){
           log.scrollTop=log.scrollHeight;
           cur=line;
         }else if(m.type==='done'){
-          // 最后一个结果返回：把完整数据落到本地，供下载 / 复制
-          batchData=m.data||{};
+          // 完成信号先到（只带计数）：立刻打印统计并显示完成区；数据随后经 payload 下发
           cur=null;
           batchLog(log,`<b>完成：共 ${m.total} 项，成功 ${m.ok}，失败 ${m.fail}</b>`);
+          $('batchDone').style.display= m.ok>0 ? 'flex' : 'none';
+          $('batchStatus').innerHTML='<span class="spin"></span>正在整理数据…';
+          updateBatchActions();
+        }else if(m.type==='payload'){
+          // 数据按股票逐条到达：合并进 batchData，等流结束（finally）再统一启用下载/复制
+          if(m.code) batchData[m.code]=m.data||{};
         }
       },
       ()=>{}  // 流结束（含中断）由 finally 统一收尾
@@ -724,7 +731,9 @@ async function openBatch(key, reopen=false){
     batchRunning=false;
     refreshReopen();
     window._batchData=batchData;
+    _batchDataReady=hasBatchData();  // 流已收尾：若确已取到数据则放开下载/复制
     $('batchDone').style.display= hasBatchData()?'flex':'none';
+    updateBatchActions();
   }
 }
 // 是否已有可用的批量获取数据
@@ -735,6 +744,15 @@ function hasBatchData(){
     }
   }
   return false;
+}
+// 依据数据是否收齐来启用/禁用"下载/复制"按钮，避免取到空内容
+function updateBatchActions(){
+  const ready=_batchDataReady && hasBatchData();
+  const dis=!ready;
+  $('btnBatchDownload').disabled=dis;
+  $('btnBatchDownloadText').disabled=dis;
+  $('btnBatchCopy').disabled=dis;
+  if(ready){ $('batchStatus').innerHTML=''; }
 }
 // 刷新所有"打开上次获取数据"按钮的可用状态：正在获取 或 已有数据时均可用
 function refreshReopen(){

@@ -1272,7 +1272,13 @@ class Handler(BaseHTTPRequestHandler):
                             fail += 1
                             emit({"type": "item", "idx": si, "code": code, "name": nm,
                                   "title": kd["title"], "ok": False, "error": str(exc)})
-                emit({"type": "done", "total": total, "ok": ok, "fail": fail, "data": buf})
+                # 先发"完成信号"（只带计数，极小，前端可立刻展示统计与按钮），
+                # 再按股票逐条下发数据。绝不能把全部数据压成一条超长 NDJSON 行：
+                # 前端发流读取时会对积累中的单行反复全量扫描（O(n²)），导致久等才响应。
+                emit({"type": "done", "total": total, "ok": ok, "fail": fail})
+                for code, cbuf in buf.items():
+                    if cbuf:
+                        emit({"type": "payload", "code": code, "data": cbuf})
             except Exception:  # noqa: BLE001  (客户端中断写失败等，静默结束)
                 pass
 
