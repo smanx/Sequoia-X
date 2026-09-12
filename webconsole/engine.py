@@ -340,10 +340,11 @@ class DataEngine:
     # 节点定义：key=标识, label=显示名, step=相对分析日的第 N 个交易日, months=日历月偏移(仅日历档口用)
     _FUTURE_NODES = [
         ("T+1", 1, None),
+        ("T+2", 2, None),
         ("T+3", 3, None),
+        ("T+4", 4, None),
         ("T+5", 5, None),
         ("1个月", None, 1),
-        ("3个月", None, 3),
         ("半年", None, 6),
         ("1年", None, 12),
     ]
@@ -361,7 +362,7 @@ class DataEngine:
 
         规则：
         - T+N：取分析日之后第 N 个【有数据的交易日】的 close。
-        - 日历档口(1月/3月/半年/1年)：目标日历日 + 日；该日不是交易日则【往后顺延】找最近有数据的交易日。
+        - 日历档口(1月/半年/1年)：目标日历日 + 日；该日不是交易日则【往后顺延】找最近有数据的交易日。
         - 若分析日之后数据不够长，返回 None（前端显示"数据不足"）。
         涨跌基于后复权 close，可消除除权影响、口径可比。
         Returns: {节点key: 涨跌幅(百分比, 可为负) 或 None}
@@ -418,7 +419,7 @@ class DataEngine:
         return [row[0] for row in rows]
 
     def future_returns_for_dates(self, symbol: str, as_of_dates: list[str]) -> dict:
-        """批量：一次读取全序列，对多个 as_of 日期分别计算 7 个未来节点收益。
+        """批量：一次读取全序列，对多个 as_of 日期分别计算各未来节点收益。
 
         相比逐个调用 future_returns，只需一次全量读取，范围分析时大幅减少 SQL。
         Returns: {as_of: {节点key: 涨跌幅 或 None}}
